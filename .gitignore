@@ -1,0 +1,14 @@
+# Godot 4+ cache & imports
+.godot/
+*.import
+*.translation
+
+# Temporary build & signing secrets
+*.keystore
+*.jks
+*.aab
+*.idsig
+/tmp_build/
+__pycache__/
+*.pyc
+.DS_Store

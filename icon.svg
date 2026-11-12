@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <rect width="512" height="512" rx="108" fill="#F2ECE1"/>
+  <!-- Kali Madiun / Bengawan Solo river ribbon -->
+  <path d="M -20 350 C 120 330, 180 210, 290 190 C 390 172, 440 95, 540 80" fill="none" stroke="#68A9C9" stroke-width="52" stroke-linecap="round"/>
+  <path d="M -20 350 C 120 330, 180 210, 290 190 C 390 172, 440 95, 540 80" fill="none" stroke="#8BC4DF" stroke-width="18" stroke-dasharray="26 24" stroke-linecap="round"/>
+  <!-- National Highway & Roundabout -->
+  <path d="M 88 456 L 256 256 L 432 436" fill="none" stroke="#363B42" stroke-width="54" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M 256 64 L 256 256" fill="none" stroke="#363B42" stroke-width="54" stroke-linecap="round"/>
+  <circle cx="256" cy="256" r="76" fill="#363B42"/>
+  <circle cx="256" cy="256" r="36" fill="#6BA358"/>
+  <circle cx="256" cy="256" r="56" fill="none" stroke="#F6D365" stroke-width="6" stroke-dasharray="16 14"/>
+  <!-- 2.5D Extruded Factory & Hauler Truck -->
+  <polygon points="92,148 168,148 182,166 106,166" fill="#A34935"/>
+  <rect x="88" y="96" width="80" height="56" rx="10" fill="#D96548"/>
+  <circle cx="128" cy="124" r="14" fill="#F9F6F0"/>
+  <!-- Articulated Truck on Highway -->
+  <g transform="translate(338,342) rotate(45)">
+    <rect x="-46" y="-17" width="52" height="34" rx="7" fill="#2C7BE5"/>
+    <rect x="12" y="-15" width="28" height="30" rx="6" fill="#1B5BB8"/>
+    <circle cx="-20" cy="0" r="9" fill="#FFD43B"/>
+  </g>
+</svg>
