@@ -8,14 +8,20 @@ Simulasi rekayasa lalu lintas mikro-agen dan logistik rantai pasok **2.5D** meng
 
 File APK rilis yang telah ditandatangani secara kriptografis (**APK Signature Scheme v1 + v2 + v3**, arsitektur `arm64-v8a`) tersedia langsung di repositori ini:
 
+- **GitHub Releases**: [`v1.2.0-madiun`](https://github.com/nafta121/studious-pancake/releases/tag/v1.2.0-madiun) · Riwayat lengkap di [`CHANGELOG.md`](CHANGELOG.md)
 - **Lokasi File APK**: [`releases/incremental-traffic-madiun-android.apk`](releases/incremental-traffic-madiun-android.apk) (`26,7 MB` / `27.980.757 byte`)
 - **Package ID**: `id.madiun.incrementaltraffic`
-- **Versi**: `1.2.0-madiun` (`versionCode: 120`)
+- **Versi**: `1.2.0-madiun` (`versionCode: 120` — mendukung *in-place update* langsung di atas `v1.1.0-madiun` tanpa menghapus data simpanan)
 - **Engine**: Godot Engine `4.7.2.stable` (Compiled GDScript Bytecode `.gdc`, GLES3 Mobile)
-- **SHA-256**: `485f4684edde0bf958de000b8363d8a13d8303519f755ed997d89ba904bff797`
+- **APK File SHA-256**: `485f4684edde0bf958de000b8363d8a13d8303519f755ed997d89ba904bff797`
+- **Signing Certificate Continuity** (`signing/madiun_godot_release.keystore`):
+  - **Certificate Serial Number**: `5071a11bb51cc4dc`
+  - **Certificate SHA-256 Digest**: `7bae8ba2a722a2168c38f3faaf0a3d61df57b32700cefdf2041fd59fbf4981ce`
+  - **Certificate SHA-1 Digest**: `4a10248317724b7f363d92c9874c5c521ef98808`
+  - **Validitas**: `2026-11-13` s/d `2054-03-31`
 
-### Cara Memasang di Perangkat Android:
-1. Unduh file `releases/incremental-traffic-madiun-android.apk` ke ponsel atau tablet Android Anda (Android 7.0+ `arm64-v8a`), atau pasang melalui ADB:
+### Cara Memasang / Memperbarui (*Update*) di Perangkat Android:
+1. Unduh `incremental-traffic-madiun-android.apk` dari halaman [**GitHub Releases**](https://github.com/nafta121/studious-pancake/releases/tag/v1.2.0-madiun) atau [`releases/incremental-traffic-madiun-android.apk`](releases/incremental-traffic-madiun-android.apk), lalu pasang langsung di atas versi sebelumnya (tanpa *uninstall* agar progres `save_<map_id>.json` tetap tersimpan), atau melalui ADB:
    ```bash
    adb install -r releases/incremental-traffic-madiun-android.apk
    ```

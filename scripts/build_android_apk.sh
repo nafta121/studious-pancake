@@ -19,19 +19,20 @@ fi
 echo "==> [1/5] Building Karesidenan Madiun WGS84 map bundle..."
 python3 "${ROOT}/scripts/build_madiun_geodata.py"
 
-KEYSTORE_PATH="${GODOT_ANDROID_KEYSTORE_RELEASE_PATH:-/tmp/madiun_godot_release.keystore}"
+DEFAULT_KS="${ROOT}/signing/madiun_godot_release.keystore"
+if [[ ! -f "${DEFAULT_KS}" && -f "${HOME}/.gemini/signing/madiun_godot_release.keystore" ]]; then
+  DEFAULT_KS="${HOME}/.gemini/signing/madiun_godot_release.keystore"
+fi
+KEYSTORE_PATH="${GODOT_ANDROID_KEYSTORE_RELEASE_PATH:-${DEFAULT_KS}}"
 KEYSTORE_USER="${GODOT_ANDROID_KEYSTORE_RELEASE_USER:-madiunrelease}"
 KEYSTORE_PASS="${GODOT_ANDROID_KEYSTORE_RELEASE_PASSWORD:-madiunandroid2026}"
+EXPECTED_CERT_SERIAL="${EXPECTED_CERT_SERIAL:-5071a11bb51cc4dc}"
+EXPECTED_CERT_SHA256="${EXPECTED_CERT_SHA256:-7bae8ba2a722a2168c38f3faaf0a3d61df57b32700cefdf2041fd59fbf4981ce}"
 
 if [[ ! -f "${KEYSTORE_PATH}" ]]; then
-  echo "==> [2/5] Generating RSA-2048 Android release signing keystore..."
-  keytool -genkeypair -v \
-    -keystore "${KEYSTORE_PATH}" \
-    -alias "${KEYSTORE_USER}" \
-    -keyalg RSA -keysize 2048 -validity 10000 \
-    -storepass "${KEYSTORE_PASS}" \
-    -keypass "${KEYSTORE_PASS}" \
-    -dname "CN=Incremental Traffic Karesidenan Madiun, OU=Mobile Game, O=Madiun Open GIS, L=Madiun, ST=Jawa Timur, C=ID" >/dev/null 2>&1
+  echo "ERROR: Release keystore not found at ${KEYSTORE_PATH}!" >&2
+  echo "Refusing to generate a random certificate so Android APK in-place updates remain compatible." >&2
+  exit 1
 fi
 
 DBG_KEYSTORE="/tmp/godot_debug.keystore"
@@ -67,7 +68,7 @@ echo "==> [4/5] Importing project & exporting signed Godot 4.7.2 Android APK..."
 "${GODOT_BIN}" --headless --path "${ROOT}" --import
 "${GODOT_BIN}" --headless --path "${ROOT}" --export-release "Android" "${OUT_APK}"
 
-echo "==> [5/5] Applying full v1/v2/v3 cryptographic signatures & verifying APK..."
+echo "==> [5/5] Applying full cryptographic signatures & verifying certificate continuity..."
 apksigner sign \
   --min-sdk-version 21 \
   --ks "${KEYSTORE_PATH}" \
@@ -78,6 +79,17 @@ apksigner sign \
   --v2-signing-enabled true \
   --v3-signing-enabled true \
   "${OUT_APK}"
-apksigner verify --verbose "${OUT_APK}" | head -n 20
+
+CERT_INFO="$(apksigner verify --verbose --print-certs "${OUT_APK}")"
+echo "${CERT_INFO}" | head -n 20
+
+ACTUAL_SHA256="$(echo "${CERT_INFO}" | awk '/Signer #1 certificate SHA-256 digest:/ {print $NF}')"
+ACTUAL_SERIAL="$(keytool -list -v -keystore "${KEYSTORE_PATH}" -alias "${KEYSTORE_USER}" -storepass "${KEYSTORE_PASS}" | awk '/Serial number:/ {print $NF}')"
+
+if [[ "${ACTUAL_SHA256}" != "${EXPECTED_CERT_SHA256}" || "${ACTUAL_SERIAL}" != "${EXPECTED_CERT_SERIAL}" ]]; then
+  echo "ERROR: Certificate mismatch! Expected serial=${EXPECTED_CERT_SERIAL} sha256=${EXPECTED_CERT_SHA256}, got serial=${ACTUAL_SERIAL} sha256=${ACTUAL_SHA256}" >&2
+  exit 1
+fi
+
 ls -lh "${OUT_APK}"
-echo "==> SUCCESS: Signed Godot Android APK ready at ${OUT_APK}"
+echo "==> SUCCESS: Signed Godot Android APK ready at ${OUT_APK} (Cert Serial: ${ACTUAL_SERIAL}, Cert SHA-256: ${ACTUAL_SHA256})"
