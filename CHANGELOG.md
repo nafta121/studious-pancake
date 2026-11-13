@@ -4,7 +4,7 @@ Seluruh perubahan penting pada rilis APK Android (`id.madiun.incrementaltraffic`
 
 ## 🔐 Jaminan Kontinuitas Sertifikat Penandatanganan APK (*Signing Certificate Continuity*)
 
-Agar pengguna Android dapat melakukan **pembaruan langsung (*in-place update* / `adb install -r`)** tanpa perlu menghapus instalasi lama atau kehilangan data simpanan permainan (`user://save_<map_id>.json`), seluruh rilis mulai `v1.1.0-madiun`, `v1.2.0-madiun`, `v1.3.0-madiun`, hingga `v1.4.0-madiun` dan rilis-rilis berikutnya dikunci menggunakan *keystore* rilis tetap (`signing/madiun_godot_release.keystore`) dengan validasi otomatis pada [`scripts/build_android_apk.sh`](scripts/build_android_apk.sh):
+Agar pengguna Android dapat melakukan **pembaruan langsung (*in-place update* / `adb install -r`)** tanpa perlu menghapus instalasi lama atau kehilangan data simpanan permainan (`user://save_<map_id>.json`), seluruh rilis mulai `v1.1.0-madiun`, `v1.2.0-madiun`, `v1.3.0-madiun`, `v1.4.0-madiun`, hingga `v1.5.0-madiun` dan rilis-rilis berikutnya dikunci menggunakan *keystore* rilis tetap (`signing/madiun_godot_release.keystore`) dengan validasi otomatis pada [`scripts/build_android_apk.sh`](scripts/build_android_apk.sh):
 
 | Atribut Sertifikat | Nilai Terkunci |
 | :--- | :--- |
@@ -16,7 +16,33 @@ Agar pengguna Android dapat melakukan **pembaruan langsung (*in-place update* / 
 | **Certificate SHA-1 Digest** | `4a10248317724b7f363d92c9874c5c521ef98808` |
 | **Masa Berlaku** | `2026-11-13` s/d `2054-03-31` |
 
-> **Catatan Pembaruan**: Jika Anda sebelumnya memasang `v1.1.0-madiun`, `v1.2.0-madiun`, atau `v1.3.0-madiun`, Anda dapat langsung mengunduh dan memasang `v1.4.0-madiun` di atasnya tanpa *uninstall*.
+> **Catatan Pembaruan**: Jika Anda sebelumnya memasang `v1.1.0-madiun` s/d `v1.4.0-madiun`, Anda dapat langsung mengunduh dan memasang `v1.5.0-madiun` di atasnya tanpa *uninstall* (skema simpanan `v: 2` otomatis dimigrasikan ke `v: 3`).
+
+---
+
+## [`v1.5.0-madiun`] — `versionCode: 150`
+
+- **Berkas APK**: [`incremental-traffic-madiun-android.apk`](releases/incremental-traffic-madiun-android.apk) (`28.202.930 byte` / `26,9 MB`, `arm64-v8a`, Android 7.0+ `minSdk: 24`, `204` berkas terpaket)
+- **APK SHA-256**: `612e154d65bfce1535f8f346939a373effddde8b201c8e96e1e13fee783373af`
+- **Certificate Serial / SHA-256**: `5071a11bb51cc4dc` / `7bae8ba2a722a2168c38f3faaf0a3d61df57b32700cefdf2041fd59fbf4981ce` (identik dengan `v1.1.0-madiun` – `v1.4.0-madiun`)
+
+### 🚛 Penyelarasan Penuh `Storage`, `Cargo`, `Route`, `Trucks` & `Commodity` Asli *Incremental Traffic* (`v1.5.0`)
+1. **Geometri Vektor 44 Komoditas `ShapeGlyphs` Asli (`shape_glyphs.gd`, `it_icons.gd`, `catalog.gd`)**:
+   - Memporting langsung seluruh templat poligon, titik pusat kotak pembatas (`box_center` / `centered_offset`), rotasi muatan di bak truk (`truck_angle`: `fish = π`, `bull = 0`, lainnya `π/2`), palet warna standar & buta warna Okabe-Ito (`color_of`), serta *skirt* garis tepi *screen-space* (`add_keylined(..., uv_expand=true)`) untuk ke-**44 komoditas** (`3` Raw + `9` Tier-2 + `11` Tier-3 + `9` Tier-4 + `12` Tier-5).
+2. **Shader Asli `truck_part.gdshader` & `truck_ghost.gdshader` + Siluet 5 Model Truk `TruckView` (`shaders/`, `tri_batch.gd`, `map_view_25d.gd`, `catalog.gd`)**:
+   - Mengintegrasikan langsung `shaders/truck_part.gdshader` (ekspansi tepi *screen-space* `clamp(screen_px, 0.26, 0.85)` bebas pecah di segala tingkat zoom Android) dan `shaders/truck_ghost.gdshader` (desaturasi abu-abu luminans `alpha = 0.80` untuk armada menuju/di Depo).
+   - Merender ke-5 model `TruckView` asli (`Hauler` `1` trailer, `Freighter` `2` trailer + kaca depan belah & deflektor atap, `Lowloader` kabin hidung panjang + knalpot krom ganda + `3` *flatbed* ber-*bolster* `#ECEEEA` yang sanggup mengangkut `3` barang ukuran apa pun, `Express` hidung baji aerodinamis + garis chevron V + bilah progres sisa bonus `2×` waktu nyata `1.3× + 3.0s`, serta `Bulker` *headache rack* + `2` bak curah cekung `#B4B9B3` khusus `6` bahan baku hulu) dalam hanya **2 *draw batch* GPU per frame** (`_truck_node` & `_truck_ghost_node`).
+   - Menyelaraskan harga beli/jual marginal `Ledger.round_price` (pembulatan 2 angka penting + penalti kuadratik di atas 60 armada) dan kinematika waktu tempuh trapesium `TruckModel.drive_time`.
+3. **Pelataran Beton Penyimpanan `FactoryLook`, Kapasitas `4..60`, `Lv.0 = 1 Bay` & Pemusnahan Kargo Basi (`sim_engine.gd`, `map_view_25d.gd`, `build_madiun_geodata.py`)**:
+   - Merender pelataran beton penyimpanan (`#CFCAC0` berbingkai `#B6B0A4`) di sisi bangunan pemasok & pabrik lengkap dengan cap air siluet komoditas `22%` serta kisi visual stok nyata sesuai level `Buffer` (`Lv.0 = 2×2 (4)`, `Lv.1 = 4×2 (8)`, `Lv.2 = 5×3 (15)`, `Lv.3 = 6×5 (30)`, `Lv.4 = 10×6 (60)`).
+   - Menyelaraskan fasilitas awal `Lv.0 = 1 bay` (dengan migrasi otomatis simpanan lama `v: 2 -> v: 3`) serta logika pemusnahan (*scrapping*) muatan yang tertahan penuh di dermaga bongkar lebih dari `SCRAP_WAIT_SEC` dengan nilai rongsokan `10%` dan penghitung `scrappedCount` pada `FactoryPanel`.
+4. **Animasi Parabolik `CargoFlights` (`hop` & `crumble`) serta Gerbong Kereta & Palka Kapal `vehicleCargo` (`sim_engine.gd`, `map_view_25d.gd`)**:
+   - Setiap bongkar-muat truk ke pelataran beton atau halaman peron/dermaga kini memicu lompatan kargo parabolik `CargoFlights.hop` disertai cincin pendaratan berdenyut, sedangkan muatan yang dibuang/ kadaluarsa memicu efek pecah `9` serpihan berputar `CargoFlights.crumble`.
+   - Rangkaian kereta api di Stasiun (`2.0×`) dan kapal kargo di Pelabuhan Tamperan (`1.6×`) merender gerbong gandeng / palka kapal yang terisi visual `ShapeGlyphs` satu per satu saat menyedot tumpukan `yardPile`.
+5. **Harmonisasi Warna Rute OKHSL `RouteColors`, `waypointsBack`, `RouteBreakMarks`, `Depot` & `TruckInspector` (`catalog.gd`, `pathfinder.gd`, `sim_engine.gd`, `map_view_25d.gd`, `android_hud.gd`, `main_game.gd`)**:
+   - Pemilihan warna rute perseptual OKHSL/OKLab (`±44°` dari warna komoditas), garis strip warna bergantian otomatis saat beberapa rute berbagi ruas jalan, serta dukungan titik singgah terpisah pergi (`Way there`) dan pulang (`Way back` / `waypointsBack`) ketika `Same way back` dimatikan.
+   - Penanda rute putus autentik `RouteBreakMarks` (garis putus-putus jalan `#FBFAF6`/`#C8323A` + lencana pil `! ROAD CLOSED / ONE-WAY / NO TURN / BLOCKED` + lencana `"N stuck"` di fasilitas asal).
+   - Bangunan **Depo Armada (`Depot`)** beratap emblem truk di setiap peta untuk parkir truk sementara/rute putus, serta panel **`TruckInspector`** lengkap saat mengetuk truk di peta maupun chip rute (kecepatan aktual, muatan, bilah bonus Express, diagnosis rantai kemacetan klik-langsung `#D4383B` + `GRIDLOCK`, jalur sisa `#4B80CA`, `Follow truck`, `Go to cause`, `Leave bay`, `To depot`, `Open route`, `Swap model`, dan `Sell truck`).
 
 ---
 

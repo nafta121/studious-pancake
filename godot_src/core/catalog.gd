@@ -324,75 +324,148 @@ const GOODS := {
 	},
 }
 
-const TRUCK_ORDER: Array[String] = ["hauler", "freighter", "express", "lowloader", "bulker"]
+const TRUCK_ORDER: Array[String] = ["hauler", "freighter", "lowloader", "express", "bulker"]
+
+## Authentic Incremental Traffic v1.4.1 `Goods` & `TruckModel` physical proportions:
+## Original 20px-wide TruckView coordinates scaled by `TRUCK_VIEW_SCALE` onto 4.6px-lane Madiun cartography.
+const TRUCK_ORIG_WIDTH := 20.0
+const TRUCK_ORIG_CAB_LEN := 22.0
+const TRUCK_ORIG_SLOT_LEN := 18.0
+const TRUCK_ORIG_COUPLING := 3.0
+const TRUCK_VIEW_SCALE := 0.24
+const EXPRESS_BONUS_FACTOR := 2.0
+const EXPRESS_DEADLINE_MULT := 1.3
+const EXPRESS_DEADLINE_PAD_SEC := 3.0
 
 const TRUCKS := {
 	"hauler": {
-		"id": "hauler", "name": "Hauler", "subtitle": "Truk Engkel Serbaguna",
-		"agility_label": "Tinggi",
-		"speed_kmh": 100, "max_speed_px": 54.0, "accel": 34.0, "decel": 72.0,
-		"cab_len": 8.0, "trailers": [2], "body_len": 20.0, "slot_cap": 2,
+		"id": "hauler", "name": "Hauler", "role": "Cheap starter",
+		"subtitle": "Cheap starter · Truk Engkel Serbaguna",
+		"agility_label": "Agility: high",
+		"speed_kmh": 100, "max_speed_px": 50.0, "accel": 28.0, "decel": 68.0,
+		"orig_cab_len": 22.0, "orig_bed_len": 0.0, "beds": false,
+		"cab_len": 5.28, "trailers": [2], "body_len": 14.64, "slot_cap": 2,
 		"raw_only": false, "any_size_per_trailer": false, "express_bonus": false,
 		"base_price": 60, "license_price": 0, "upkeep_min": 2,
 		"color": Color("#3b82f6"), "accent": Color("#dbeafe")
 	},
 	"freighter": {
-		"id": "freighter", "name": "Freighter", "subtitle": "Gandeng Ganda 4 Slot",
-		"agility_label": "Sedang",
-		"speed_kmh": 80, "max_speed_px": 44.0, "accel": 25.0, "decel": 58.0,
-		"cab_len": 8.0, "trailers": [2, 2], "body_len": 32.0, "slot_cap": 4,
+		"id": "freighter", "name": "Freighter", "role": "Double trailer",
+		"subtitle": "Double trailer · Gandeng Ganda 4 Slot",
+		"agility_label": "Agility: medium",
+		"speed_kmh": 80, "max_speed_px": 40.0, "accel": 22.4, "decel": 54.5,
+		"orig_cab_len": 22.0, "orig_bed_len": 0.0, "beds": false,
+		"cab_len": 5.28, "trailers": [2, 2], "body_len": 24.0, "slot_cap": 4,
 		"raw_only": false, "any_size_per_trailer": false, "express_bonus": false,
 		"base_price": 250, "license_price": 1200, "upkeep_min": 20,
 		"color": Color("#0ca678"), "accent": Color("#d3f9d8")
 	},
-	"express": {
-		"id": "express", "name": "Express", "subtitle": "Kilat 150 km/j (Bayaran 2× Tepat Waktu)",
-		"agility_label": "Ekstrem",
-		"speed_kmh": 150, "max_speed_px": 80.0, "accel": 58.0, "decel": 115.0,
-		"cab_len": 8.0, "trailers": [2], "body_len": 20.0, "slot_cap": 2,
-		"raw_only": false, "any_size_per_trailer": false, "express_bonus": true,
-		"base_price": 500, "license_price": 10000, "upkeep_min": 60,
-		"color": Color("#f59f00"), "accent": Color("#fff3bf")
-	},
 	"lowloader": {
-		"id": "lowloader", "name": "Lowloader", "subtitle": "3 Flatbed Kargo Berat (3 Ukuran Apa Saja)",
-		"agility_label": "Rendah",
-		"speed_kmh": 70, "max_speed_px": 39.0, "accel": 20.0, "decel": 48.0,
-		"cab_len": 9.5, "trailers": [1, 1, 1], "body_len": 36.0, "slot_cap": 3,
+		"id": "lowloader", "name": "Lowloader", "role": "Three of anything, large goods too",
+		"subtitle": "Three of anything, large goods too · 3 Flatbed Berat",
+		"agility_label": "Agility: low",
+		"speed_kmh": 70, "max_speed_px": 35.0, "accel": 16.8, "decel": 41.2,
+		"orig_cab_len": 28.0, "orig_bed_len": 22.0, "beds": true,
+		"cab_len": 6.72, "trailers": [1, 1, 1], "body_len": 24.72, "slot_cap": 3,
 		"raw_only": false, "any_size_per_trailer": true, "express_bonus": false,
 		"base_price": 500, "license_price": 100000, "upkeep_min": 30,
 		"color": Color("#d9480f"), "accent": Color("#ffe8cc")
 	},
+	"express": {
+		"id": "express", "name": "Express", "role": "Paid double when on time",
+		"subtitle": "Paid double when on time · Kilat 150 km/j (2× Bonus)",
+		"agility_label": "Agility: extreme",
+		"speed_kmh": 150, "max_speed_px": 75.0, "accel": 56.0, "decel": 133.0,
+		"orig_cab_len": 22.0, "orig_bed_len": 0.0, "beds": false,
+		"cab_len": 5.28, "trailers": [2], "body_len": 14.64, "slot_cap": 2,
+		"raw_only": false, "any_size_per_trailer": false, "express_bonus": true,
+		"base_price": 500, "license_price": 10000, "upkeep_min": 60,
+		"color": Color("#f59f00"), "accent": Color("#fff3bf")
+	},
 	"bulker": {
-		"id": "bulker", "name": "Bulker", "subtitle": "Hopper Curah 6 Bahan Baku Hulu",
-		"agility_label": "Rendah",
-		"speed_kmh": 70, "max_speed_px": 39.0, "accel": 20.0, "decel": 48.0,
-		"cab_len": 8.5, "trailers": [3, 3], "body_len": 33.0, "slot_cap": 6,
+		"id": "bulker", "name": "Bulker", "role": "Six raw shapes, nothing else",
+		"subtitle": "Six raw shapes, nothing else · Hopper Curah 6 Bahan Hulu",
+		"agility_label": "Agility: low",
+		"speed_kmh": 70, "max_speed_px": 35.0, "accel": 16.8, "decel": 41.2,
+		"orig_cab_len": 22.0, "orig_bed_len": 36.0, "beds": true,
+		"cab_len": 5.28, "trailers": [3, 3], "body_len": 24.0, "slot_cap": 6,
 		"raw_only": true, "any_size_per_trailer": false, "express_bonus": false,
 		"base_price": 500, "license_price": 200000, "upkeep_min": 30,
 		"color": Color("#495057"), "accent": Color("#dee2e6")
 	},
 }
 
+static var _truck_units_cache: Dictionary = {}
+
+static func is_raw_good(good_id: String) -> bool:
+	return GOODS.has(good_id) and String(GOODS[good_id]["role"]) == "raw"
+
+## Authentic `TruckModel.units(model)` in original 20px-wide TruckView coordinates!
+static func get_truck_units(model_id: String) -> Array[Dictionary]:
+	if _truck_units_cache.has(model_id):
+		return _truck_units_cache[model_id]
+	var m: Dictionary = TRUCKS.get(model_id, TRUCKS["hauler"])
+	var at: float = float(m.get("orig_cab_len", TRUCK_ORIG_CAB_LEN))
+	var out: Array[Dictionary] = [{"front": 0.0, "rear": at, "first_slot": 0, "slots": 0, "cab": true, "bed": false}]
+	var slot: int = 0
+	var beds: bool = bool(m.get("beds", false))
+	var bed_len: float = float(m.get("orig_bed_len", 22.0))
+	for n_raw in m["trailers"]:
+		var n: int = int(n_raw)
+		var front: float = at + TRUCK_ORIG_COUPLING
+		at = front + (bed_len if beds else float(n) * TRUCK_ORIG_SLOT_LEN)
+		out.append({"front": front, "rear": at, "first_slot": slot, "slots": n, "cab": false, "bed": beds})
+		slot += n
+	_truck_units_cache[model_id] = out
+	return out
+
+static func get_truck_world_length(model_id: String) -> float:
+	var u: Array[Dictionary] = get_truck_units(model_id)
+	return float(u[u.size() - 1]["rear"]) * TRUCK_VIEW_SCALE
+
+static func describe_truck_capacity(model_id: String) -> String:
+	var m: Dictionary = TRUCKS.get(model_id, TRUCKS["hauler"])
+	var s: int = int(m["slot_cap"])
+	if bool(m["raw_only"]):
+		return "%d raw shapes" % s
+	if bool(m["beds"]):
+		return "%d of any size" % s
+	return "%d small or %d large" % [s, s / 2]
+
+## Authentic `TruckModel.drive_time` (`_6gyOzneQRV9n`): exact trapezoid/triangle kinematic travel time!
+static func compute_truck_drive_time(model_id: String, length_px: float, v0: float = 0.0, v1: float = 0.0, speed_mult: float = 1.0) -> float:
+	if length_px <= 0.0:
+		return 0.0
+	var m: Dictionary = TRUCKS.get(model_id, TRUCKS["hauler"])
+	var a: float = maxf(1.0, float(m["accel"]))
+	var d: float = maxf(1.0, float(m["decel"]))
+	var top: float = maxf(8.0, float(m["max_speed_px"]) * speed_mult)
+	var peak: float = minf(top, sqrt((2.0 * a * d * length_px + d * v0 * v0 + a * v1 * v1) / (a + d)))
+	var v_in: float = minf(v0, peak)
+	var v_out: float = minf(v1, peak)
+	var d_acc: float = (peak * peak - v_in * v_in) / (2.0 * a)
+	var d_dec: float = (peak * peak - v_out * v_out) / (2.0 * d)
+	var cruise: float = maxf(0.0, length_px - d_acc - d_dec)
+	return (peak - v_in) / a + (peak - v_out) / d + cruise / maxf(0.1, peak)
+
+## Authentic `Ledger.round_price`: rounds prices >= 10 to 2 significant digits!
 static func round_2sig(v: float) -> int:
 	if v <= 0.0:
 		return 0
 	if v < 10.0:
 		return int(round(v))
-	if v < 100.0:
-		return int(round(v))
 	var digits: int = int(floor(log(v) / log(10.0) + 1e-9)) - 1
 	var step: float = pow(10.0, float(digits))
 	return int(round(v / step) * step)
 
-## Authentic Ledger.truck_price(model, owned_of_model, total_fleet)
+## Authentic `Ledger.truck_price(model, owned_of_model, total_fleet)`
 static func compute_truck_buy_price(model_id: String, owned_of_model: int, total_fleet: int) -> int:
 	var def: Dictionary = TRUCKS.get(model_id, TRUCKS["hauler"])
 	var over_60: float = float(maxi(0, total_fleet - 60))
 	var mult: float = 1.0 + 0.08 * float(maxi(0, owned_of_model)) + 0.001 * over_60 * over_60
 	return round_2sig(float(def["base_price"]) * mult)
 
-## Authentic Ledger.resale_value: 50% of the marginal scaled purchase price of the last truck bought!
+## Authentic `Ledger.resale_value`: 50% of the marginal scaled purchase price of the last truck bought!
 static func compute_truck_resale_price(model_id: String, owned_of_model: int, total_fleet: int) -> int:
 	var prev_buy: int = compute_truck_buy_price(model_id, maxi(0, owned_of_model - 1), maxi(0, total_fleet - 1))
 	return int(round(float(prev_buy) * 0.5))
@@ -404,13 +477,65 @@ static func compute_max_carry_units(model_id: String, good_id: String) -> int:
 	var t: Dictionary = TRUCKS.get(model_id, TRUCKS["hauler"])
 	if bool(t["raw_only"]) and String(g["role"]) != "raw":
 		return 0
-	if bool(t["any_size_per_trailer"]):
-		return (t["trailers"] as Array).size()
+	if bool(t["beds"]):
+		return int(t["slot_cap"])
 	var g_slots: int = maxi(1, int(g["slots"]))
-	var units: int = 0
-	for tr_slots in t["trailers"]:
-		units += int(int(tr_slots) / g_slots)
-	return units
+	return int(t["slot_cap"]) / g_slots
+
+## Authentic `RouteColors.pick(rng, taken, base)`: OKHSL/OKLab perceptual harmonizer within ±44° of good color!
+static func pick_route_color(rng: RandomNumberGenerator, taken_colors: Array, good_id: String = "") -> Color:
+	var base: Color = Color("8B5A9C")
+	if good_id != "" and GOODS.has(good_id):
+		base = ShapeGlyphs.color_of(good_id)
+	var best := base
+	var best_dist: float = -1.0
+	for _i in range(24):
+		var h: float = fposmod(base.ok_hsl_h + rng.randf_range(-44.0, 44.0) / 360.0, 1.0)
+		var peak_l: float = _okhsl_peak_lightness(h)
+		var l: float = clampf(peak_l + rng.randf_range(-0.08, 0.03), 0.62, 0.86)
+		var s: float = rng.randf_range(0.85, 1.0)
+		var c: Color = Color.from_ok_hsl(h, s, l)
+		while _srgb_luminance(c) < 0.16 and l < 0.86:
+			l += 0.02
+			c = Color.from_ok_hsl(h, s, l)
+		var min_d: float = 10.0
+		for t_col in taken_colors:
+			min_d = minf(min_d, _oklab_route_distance(c, t_col))
+		if min_d > best_dist:
+			best_dist = min_d
+			best = c
+	return best
+
+static func _okhsl_peak_lightness(h: float) -> float:
+	var best_l: float = 0.5
+	var best_c: float = -1.0
+	for i in range(31):
+		var l: float = 0.35 + float(i) * 0.02
+		var lab: Vector3 = _to_oklab(Color.from_ok_hsl(h, 1.0, l))
+		var chr: float = Vector2(lab.y, lab.z).length()
+		if chr > best_c:
+			best_c = chr
+			best_l = l
+	return best_l
+
+static func _oklab_route_distance(a: Color, b: Color) -> float:
+	var d: Vector3 = _to_oklab(a) - _to_oklab(b)
+	return Vector3(d.x * 0.5, d.y, d.z).length() / 0.08
+
+static func _to_oklab(c: Color) -> Vector3:
+	var lin: Color = c.srgb_to_linear()
+	var l: float = pow(maxf(0.0, 0.4122214708 * lin.r + 0.5363325363 * lin.g + 0.0514459929 * lin.b), 1.0 / 3.0)
+	var m: float = pow(maxf(0.0, 0.2119034982 * lin.r + 0.6806995451 * lin.g + 0.1073969566 * lin.b), 1.0 / 3.0)
+	var s: float = pow(maxf(0.0, 0.0883024619 * lin.r + 0.2817188376 * lin.g + 0.6299787005 * lin.b), 1.0 / 3.0)
+	return Vector3(
+		0.2104542553 * l + 0.7936177850 * m - 0.0040720468 * s,
+		1.9779984951 * l - 2.4285922050 * m + 0.4505937099 * s,
+		0.0259040371 * l + 0.7827717662 * m - 0.8086757660 * s
+	)
+
+static func _srgb_luminance(c: Color) -> float:
+	var lin: Color = c.srgb_to_linear()
+	return 0.2126 * lin.r + 0.7152 * lin.g + 0.0722 * lin.b
 
 static func factory_title_for(good_id: String) -> String:
 	if not GOODS.has(good_id):

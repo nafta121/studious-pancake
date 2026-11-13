@@ -712,7 +712,7 @@ def make_facility(
             "expand": 0,
             "speed": 0,
             "buffer": 0,
-            "bays": 1,
+            "bays": 0,
             "wideGate": 0,
             "exitRoad": 0,
             "trainLength": 0,
@@ -1897,6 +1897,33 @@ def build_all_maps():
             off["lengthPx"] = round(sum(e_lookup[eid]["lengthPx"] for eid in off["edgeIds"]), 1)
             b_px = sum((s1 - s0) for eid in off["edgeIds"] for s0, s1 in e_lookup[eid]["bridgeSpans"])
             off["bridgeSpanPx"] = round(b_px, 1)
+
+        # Place an authentic Incremental Traffic Town Depot connected to a starter-region junction
+        starter_juncs = [j for j in m["junctions"] if int(j.get("regionIndex", 0)) == 0]
+        hub_j = starter_juncs[0] if starter_juncs else m["junctions"][0]
+        best_pos = (float(hub_j["x"]) + 28.0, float(hub_j["y"]) - 28.0)
+        best_score = -1e9
+        best_ang = 0.0
+        for ai in range(16):
+            ang = (2.0 * math.pi * ai) / 16.0
+            cand = (round(float(hub_j["x"]) + math.cos(ang) * 32.0, 1), round(float(hub_j["y"]) + math.sin(ang) * 32.0, 1))
+            min_f = min((math.hypot(cand[0] - float(fc["x"]), cand[1] - float(fc["y"])) for fc in m["facilities"]), default=999.0)
+            min_r = 999.0
+            for rd in m["roads"]:
+                for p in rd["points"]:
+                    min_r = min(min_r, math.hypot(cand[0] - p[0], cand[1] - p[1]))
+            score = min(min_f, 48.0) * 1.5 + min(min_r, 26.0) * 2.5
+            if score > best_score:
+                best_score = score
+                best_pos = cand
+                best_ang = round(math.atan2(float(hub_j["y"]) - cand[1], float(hub_j["x"]) - cand[0]) - math.pi * 0.5, 3)
+        m["depot"] = {
+            "name": "Depo Armada",
+            "x": best_pos[0],
+            "y": best_pos[1],
+            "angle": best_ang,
+            "junctionId": hub_j["id"],
+        }
 
     os.makedirs(os.path.dirname(OUT_JSON), exist_ok=True)
     payload = json.dumps({"version": 1, "maps": maps}, separators=(",", ":"))

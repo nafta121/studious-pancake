@@ -1,9 +1,10 @@
 class_name RoutePathfinder
 extends RefCounted
 
-## Directed road-graph Dijkstra router supporting forward/return waypoints, one-way rules,
-## closed streets, multi-phase traffic light turn masks, lane turn-arrow restrictions,
-## region locks, Express kinematic clear-time, and Indonesian diagnostics.
+## Directed road-graph Dijkstra router matching Incremental Traffic v1.4.1 `TruckRoute` & `RouteBreakMarks`:
+## Supports forward & separate return waypoints, one-way rules, closed streets, multi-phase traffic-light
+## turn masks, lane turn-arrow restrictions, region locks, exact kinematic `TruckModel.drive_time` for
+## Express deadlines (`now + best * 1.3 + 3.0`), and pinpointed break location diagnostics.
 
 const TURN_LEFT := 1
 const TURN_STRAIGHT := 2
@@ -33,7 +34,6 @@ static func classify_turn_bit(j_map: Dictionary, road_map: Dictionary, in_edge_i
 		dir_out = (pts_out[maxi(0, pts_out.size() - 2)] - pts_out[pts_out.size() - 1]).normalized()
 	if dir_in.length_squared() < 0.001 or dir_out.length_squared() < 0.001:
 		return TURN_STRAIGHT
-	# Screen/world Y-down coordinates: cross > 0 is clockwise (right turn), cross < 0 is counter-clockwise (left turn)
 	var ang: float = dir_in.angle_to(dir_out)
 	if absf(ang) <= 0.48:
 		return TURN_STRAIGHT
@@ -60,6 +60,16 @@ static func light_allows_turn(j_node: Dictionary, in_edge_id: String, turn_bit: 
 		return false
 	return float(lt_d.get("phaseAGreen", 10.0)) > 0.1 and float(lt_d.get("phaseBGreen", 10.0)) > 0.1
 
+static func _road_speed_mult(road_class: String) -> float:
+	match road_class:
+		"toll":
+			return 1.22
+		"national":
+			return 1.06
+		"local":
+			return 0.84
+	return 1.0
+
 static func find_directed_path(
 	start_junction_id: String,
 	end_junction_id: String,
@@ -70,7 +80,16 @@ static func find_directed_path(
 	truck_model_id: String
 ) -> Dictionary:
 	if start_junction_id == end_junction_id and waypoints.is_empty():
-		return {"steps": [], "clear_time_sec": 2.5, "broken_reason": ""}
+		return {
+			"steps": [],
+			"clear_time_sec": 2.5,
+			"broken_reason": "",
+			"broken_kind": "",
+			"broken_tag": "",
+			"broken_edge_id": "",
+			"broken_junction_id": "",
+			"broken_pos": Vector2.INF
+		}
 
 	var chain: Array[String] = [start_junction_id]
 	for wp in waypoints:
@@ -81,7 +100,6 @@ static func find_directed_path(
 		chain.append(end_junction_id)
 
 	var all_steps: Array[Dictionary] = []
-	var total_clear_sec: float = 0.0
 
 	for leg_i in range(chain.size() - 1):
 		var prev_edge_id: String = ""
@@ -102,15 +120,40 @@ static func find_directed_path(
 		)
 		var reason := String(leg_res["broken_reason"])
 		if reason != "":
-			return {"steps": [], "clear_time_sec": 0.0, "broken_reason": reason}
+			return leg_res
 		for st in leg_res["steps"]:
 			all_steps.append(st)
-		total_clear_sec += float(leg_res["clear_time_sec"])
+
+	# Compute exact kinematic traversal time (`TruckModel.drive_time`) across the assembled road chain!
+	var tdef: Dictionary = GameCatalog.TRUCKS.get(truck_model_id, GameCatalog.TRUCKS["hauler"])
+	var max_v: float = float(tdef["max_speed_px"])
+	var total_clear_sec: float = 0.0
+	for si in range(all_steps.size()):
+		var st: Dictionary = all_steps[si]
+		var eid := String(st["edgeId"])
+		var edge: Dictionary = road_map[eid]
+		var mult: float = _road_speed_mult(String(edge["roadClass"]))
+		var seg_len: float = float(st["lengthPx"])
+		var v0: float = 0.0 if si == 0 else max_v * 0.72
+		var v1: float = 0.0 if si == all_steps.size() - 1 else max_v * 0.72
+		var j_to: Dictionary = junction_map.get(String(st["toJunctionId"]), {})
+		var ctrl := String(j_to.get("control", "none"))
+		if si < all_steps.size() - 1:
+			if ctrl == "roundabout" or ctrl == "roundabout2":
+				v1 = minf(v1, max_v * 0.58)
+			elif ctrl == "lights":
+				total_clear_sec += 0.45
+		total_clear_sec += GameCatalog.compute_truck_drive_time(truck_model_id, seg_len, v0, v1, mult)
 
 	return {
 		"steps": all_steps,
-		"clear_time_sec": maxf(3.0, total_clear_sec),
-		"broken_reason": ""
+		"clear_time_sec": maxf(2.5, total_clear_sec),
+		"broken_reason": "",
+		"broken_kind": "",
+		"broken_tag": "",
+		"broken_edge_id": "",
+		"broken_junction_id": "",
+		"broken_pos": Vector2.INF
 	}
 
 static func _dijkstra_leg(
@@ -124,12 +167,18 @@ static func _dijkstra_leg(
 	initial_in_fwd: bool = true
 ) -> Dictionary:
 	if src_id == dst_id:
-		return {"steps": [], "clear_time_sec": 1.0, "broken_reason": ""}
+		return {
+			"steps": [], "clear_time_sec": 1.0, "broken_reason": "",
+			"broken_kind": "", "broken_tag": "", "broken_edge_id": "",
+			"broken_junction_id": "", "broken_pos": Vector2.INF
+		}
 	if not junction_map.has(src_id) or not junction_map.has(dst_id):
-		return {"steps": [], "clear_time_sec": 0.0, "broken_reason": "Simpang rute tidak valid"}
-
-	var tdef: Dictionary = GameCatalog.TRUCKS.get(truck_model_id, GameCatalog.TRUCKS["hauler"])
-	var max_v: float = float(tdef["max_speed_px"])
+		return {
+			"steps": [], "clear_time_sec": 0.0,
+			"broken_reason": "Simpang rute tidak valid",
+			"broken_kind": "no_road", "broken_tag": "No road",
+			"broken_edge_id": "", "broken_junction_id": src_id, "broken_pos": Vector2.INF
+		}
 
 	var dist := {src_id: 0.0}
 	var prev_node := {}
@@ -137,10 +186,11 @@ static func _dijkstra_leg(
 	var visited := {}
 	var queue: Array[String] = [src_id]
 
-	var blocked_by_oneway: bool = false
-	var blocked_by_closed: bool = false
-	var blocked_by_light: bool = false
-	var blocked_by_lanes: bool = false
+	var blocked_oneway_edge := ""
+	var blocked_closed_edge := ""
+	var blocked_light_junc := ""
+	var blocked_lanes_junc := ""
+	var blocked_lanes_edge := ""
 
 	while not queue.is_empty():
 		var best_idx: int = 0
@@ -178,7 +228,8 @@ static func _dijkstra_leg(
 			if not unlocked_regions.has(int(edge["regionIndex"])):
 				continue
 			if bool(edge["closed"]):
-				blocked_by_closed = true
+				if blocked_closed_edge == "":
+					blocked_closed_edge = eid
 				continue
 
 			var forward: bool = String(edge["from"]) == best_u
@@ -188,42 +239,39 @@ static func _dijkstra_leg(
 
 			var ow: int = int(edge["oneWay"])
 			if (forward and ow == -1) or ((not forward) and ow == 1):
-				blocked_by_oneway = true
+				if blocked_oneway_edge == "":
+					blocked_oneway_edge = eid
 				continue
 
-			# Enforce lane turn-arrow mask & traffic-light turn heads when turning through best_u
 			if in_edge_u != "" and in_edge_u != eid:
 				var t_bit: int = classify_turn_bit(junction_map, road_map, in_edge_u, in_fwd_u, best_u, eid, forward)
 				var r_prev: Dictionary = road_map[in_edge_u]
 				var lane_mask: int = int(r_prev.get("turnMaskForward" if in_fwd_u else "turnMaskBackward", TURN_ALL))
 				if (lane_mask & t_bit) == 0:
-					blocked_by_lanes = true
+					if blocked_lanes_junc == "":
+						blocked_lanes_junc = best_u
+						blocked_lanes_edge = in_edge_u
 					continue
 				if not light_allows_turn(jnode, in_edge_u, t_bit):
-					blocked_by_light = true
+					if blocked_light_junc == "":
+						blocked_light_junc = best_u
 					continue
 
-			var class_factor: float = 1.0
-			var rc := String(edge["roadClass"])
-			if rc == "toll":
-				class_factor = 1.22
-			elif rc == "national":
-				class_factor = 1.06
-			elif rc == "local":
-				class_factor = 0.84
-
+			var mult: float = _road_speed_mult(String(edge["roadClass"]))
 			var seg_len: float = float(edge["lengthPx"])
-			var travel_sec: float = seg_len / maxf(14.0, max_v * class_factor)
+			var tdef: Dictionary = GameCatalog.TRUCKS.get(truck_model_id, GameCatalog.TRUCKS["hauler"])
+			var v_cruise: float = float(tdef["max_speed_px"]) * 0.72
+			var travel_sec: float = GameCatalog.compute_truck_drive_time(truck_model_id, seg_len, v_cruise, v_cruise, mult)
 			var j_next: Dictionary = junction_map[nxt_id]
 			var ctrl := String(j_next["control"])
-			var j_pen: float = 0.55
+			var j_pen: float = 0.50
 			if ctrl == "lights":
-				j_pen = 1.35
+				j_pen = 1.25
 			elif ctrl == "roundabout" or ctrl == "roundabout2":
-				j_pen = 0.40
+				j_pen = 0.38
 			elif ctrl == "yield":
 				var is_minor: bool = (j_next.get("yieldMinorEdgeIds", []) as Array).has(eid)
-				j_pen = 0.85 if is_minor else 0.15
+				j_pen = 0.80 if is_minor else 0.15
 
 			var alt: float = best_d + travel_sec + j_pen
 			if not dist.has(nxt_id) or alt < float(dist[nxt_id]):
@@ -241,15 +289,52 @@ static func _dijkstra_leg(
 
 	if not prev_step.has(dst_id):
 		var msg := "Tidak ada jalur jalan terhubung"
-		if blocked_by_oneway:
-			msg = "Terhalang arah jalan satu arah (One-Way)"
-		elif blocked_by_light:
-			msg = "Terhalang fase lampu (belokan tanpa hijau)"
-		elif blocked_by_lanes:
-			msg = "Terhalang panah lajur belok (Turn Arrows)"
-		elif blocked_by_closed:
+		var b_kind := "no_road"
+		var b_tag := "No road"
+		var b_edge := ""
+		var b_junc := dst_id
+		var b_pos: Vector2 = junction_map[dst_id]["pos"] if junction_map.has(dst_id) else Vector2.INF
+
+		if blocked_closed_edge != "" and road_map.has(blocked_closed_edge):
 			msg = "Terhalang jalan ditutup (Close Street)"
-		return {"steps": [], "clear_time_sec": 0.0, "broken_reason": msg}
+			b_kind = "closed"
+			b_tag = "Closed"
+			b_edge = blocked_closed_edge
+			var pts_c: PackedVector2Array = road_map[b_edge]["pts"]
+			b_pos = pts_c[pts_c.size() / 2] if not pts_c.is_empty() else b_pos
+			b_junc = ""
+		elif blocked_oneway_edge != "" and road_map.has(blocked_oneway_edge):
+			msg = "Terhalang arah jalan satu arah (One-Way)"
+			b_kind = "one_way"
+			b_tag = "One-way"
+			b_edge = blocked_oneway_edge
+			var pts_o: PackedVector2Array = road_map[b_edge]["pts"]
+			b_pos = pts_o[pts_o.size() / 2] if not pts_o.is_empty() else b_pos
+			b_junc = ""
+		elif blocked_lanes_junc != "" and junction_map.has(blocked_lanes_junc):
+			msg = "Terhalang panah lajur belok (No Turn)"
+			b_kind = "no_turn"
+			b_tag = "No turn"
+			b_edge = blocked_lanes_edge
+			b_junc = blocked_lanes_junc
+			b_pos = junction_map[b_junc]["pos"]
+		elif blocked_light_junc != "" and junction_map.has(blocked_light_junc):
+			msg = "Terhalang fase lampu (No Green)"
+			b_kind = "no_green"
+			b_tag = "No green"
+			b_junc = blocked_light_junc
+			b_pos = junction_map[b_junc]["pos"]
+
+		return {
+			"steps": [],
+			"clear_time_sec": 0.0,
+			"broken_reason": msg,
+			"broken_kind": b_kind,
+			"broken_tag": b_tag,
+			"broken_edge_id": b_edge,
+			"broken_junction_id": b_junc,
+			"broken_pos": b_pos
+		}
 
 	var rev_steps: Array[Dictionary] = []
 	var cur: String = dst_id
@@ -261,5 +346,10 @@ static func _dijkstra_leg(
 	return {
 		"steps": rev_steps,
 		"clear_time_sec": float(dist[dst_id]),
-		"broken_reason": ""
+		"broken_reason": "",
+		"broken_kind": "",
+		"broken_tag": "",
+		"broken_edge_id": "",
+		"broken_junction_id": "",
+		"broken_pos": Vector2.INF
 	}

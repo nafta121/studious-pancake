@@ -4,6 +4,7 @@ extends Camera2D
 ## Android multi-touch pinch-to-zoom & inertial pan Camera2D controller.
 
 signal world_tapped(world_pos: Vector2)
+signal manual_pan_started()
 
 const MIN_ZOOM: float = 0.28
 const MAX_ZOOM: float = 2.35
@@ -84,8 +85,9 @@ func _unhandled_input(event: InputEvent) -> void:
 	elif event is InputEventScreenDrag:
 		var sd := event as InputEventScreenDrag
 		_touches[sd.index] = sd.position
-		if sd.position.distance_to(_tap_start_pos) > 12.0:
+		if not _tap_moved and sd.position.distance_to(_tap_start_pos) > 12.0:
 			_tap_moved = true
+			manual_pan_started.emit()
 
 		if _touches.size() == 1:
 			var world_delta: Vector2 = -sd.relative / maxf(0.15, zoom.x)

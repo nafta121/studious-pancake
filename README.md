@@ -1,19 +1,19 @@
-# Incremental Traffic: Karesidenan Madiun (Godot 4.7.2 Android Edition — v1.4.0)
+# Incremental Traffic: Karesidenan Madiun (Godot 4.7.2 Android Edition — v1.5.0)
 
-Simulasi rekayasa lalu lintas mikro-agen dan logistik rantai pasok **2.5D** menggunakan **Godot Engine 4.7.2 (`gl_compatibility` Mobile Renderer)** yang mengambil langsung **10 Berkas Shader Asli (`city_building`, `city_reveal`, `city_shadow`, `city_ground`, `road_verge`, `cloud_puff`, `rule_hints`, `water_ripples`, `leaning_roof`, `extrude_25d`), Arsitektur `Road Shape`, `Road Size` (`1.68×` Lebar Truk) & Polilin Per-Lajur (`SimCore::set_lane`, `RoadBed`, `RoadSurface`, `LaneMarkings`), Seluruh 44 Komoditas & Ekonomi `simcore` Asli, Lampu Lalu Lintas Multi-Fase, Gudang Stasiun/Pelabuhan *Update 1.10*, Tema `"Sticker"`, Font, Ikon Vektor, Logo, dan 26 Efek Suara Asli *Incremental Traffic***, dipadukan dengan **alur jalan dunia nyata (OSRM / OpenStreetMap WGS84)** di seluruh **6 Kota & Kabupaten eks-Karesidenan Madiun, Jawa Timur**, serta optimalisasi penuh **60–120 FPS bebas kebocoran memori** untuk perangkat **Android**.
+Simulasi rekayasa lalu lintas mikro-agen dan logistik rantai pasok **2.5D** menggunakan **Godot Engine 4.7.2 (`gl_compatibility` Mobile Renderer)** yang mengambil langsung **12 Berkas Shader Asli (`truck_part`, `truck_ghost`, `city_building`, `city_reveal`, `city_shadow`, `city_ground`, `road_verge`, `cloud_puff`, `rule_hints`, `water_ripples`, `leaning_roof`, `extrude_25d`), Vektor 44 Komoditas `ShapeGlyphs`, 5 Armada `TruckView` & `TruckInspector`, Pelataran Beton `FactoryLook` + `CargoFlights`, Rute OKHSL `RouteColors` + `RouteBreakMarks` + `Depot`, Arsitektur `Road Shape` (`1.68×` Lebar Truk) & Polilin Per-Lajur (`SimCore::set_lane`), Tema `"Sticker"`, Font, Ikon Vektor, Logo, dan 26 Efek Suara Asli *Incremental Traffic***, dipadukan dengan **alur jalan dunia nyata (OSRM / OpenStreetMap WGS84)** di seluruh **6 Kota & Kabupaten eks-Karesidenan Madiun, Jawa Timur**, serta optimalisasi penuh **60–120 FPS bebas kebocoran memori** untuk perangkat **Android**.
 
 ---
 
-## 📱 Unduh & Instalasi APK Android (`v1.4.0-madiun`)
+## 📱 Unduh & Instalasi APK Android (`v1.5.0-madiun`)
 
 File APK rilis yang telah ditandatangani secara kriptografis (**APK Signature Scheme v1 + v2 + v3**, arsitektur `arm64-v8a`) tersedia langsung di repositori ini:
 
-- **GitHub Releases**: [`v1.4.0-madiun`](https://github.com/nafta121/studious-pancake/releases/tag/v1.4.0-madiun) · Riwayat lengkap di [`CHANGELOG.md`](CHANGELOG.md)
-- **Lokasi File APK**: [`releases/incremental-traffic-madiun-android.apk`](releases/incremental-traffic-madiun-android.apk) (`26,8 MB` / `28.087.908 byte`)
+- **GitHub Releases**: [`v1.5.0-madiun`](https://github.com/nafta121/studious-pancake/releases/tag/v1.5.0-madiun) · Riwayat lengkap di [`CHANGELOG.md`](CHANGELOG.md)
+- **Lokasi File APK**: [`releases/incremental-traffic-madiun-android.apk`](releases/incremental-traffic-madiun-android.apk) (`26,9 MB` / `28.202.930 byte`)
 - **Package ID**: `id.madiun.incrementaltraffic`
-- **Versi**: `1.4.0-madiun` (`versionCode: 140` — mendukung *in-place update* langsung di atas `v1.1.0-madiun` – `v1.3.0-madiun` tanpa menghapus data simpanan)
+- **Versi**: `1.5.0-madiun` (`versionCode: 150` — mendukung *in-place update* langsung di atas `v1.1.0-madiun` – `v1.4.0-madiun` tanpa menghapus data simpanan)
 - **Engine**: Godot Engine `4.7.2.stable` (Compiled GDScript Bytecode `.gdc`, GLES3 Mobile, `0` Script/Shader Error, `0` Leaked Resources)
-- **APK File SHA-256**: `8a9c1dcb7522dcd38e89a7cbdc1b78a1e54c4a9c1c6eb63d0246742b1eab042e`
+- **APK File SHA-256**: `612e154d65bfce1535f8f346939a373effddde8b201c8e96e1e13fee783373af`
 - **Signing Certificate Continuity** (`signing/madiun_godot_release.keystore`):
   - **Certificate Serial Number**: `5071a11bb51cc4dc`
   - **Certificate SHA-256 Digest**: `7bae8ba2a722a2168c38f3faaf0a3d61df57b32700cefdf2041fd59fbf4981ce`
@@ -21,34 +21,30 @@ File APK rilis yang telah ditandatangani secara kriptografis (**APK Signature Sc
   - **Validitas**: `2026-11-13` s/d `2054-03-31`
 
 ### Cara Memasang / Memperbarui (*Update*) di Perangkat Android:
-1. Unduh `incremental-traffic-madiun-android.apk` dari halaman [**GitHub Releases `v1.4.0-madiun`**](https://github.com/nafta121/studious-pancake/releases/tag/v1.4.0-madiun) atau [`releases/incremental-traffic-madiun-android.apk`](releases/incremental-traffic-madiun-android.apk), lalu pasang langsung di atas versi sebelumnya (tanpa *uninstall* agar progres `save_<map_id>.json` tetap tersimpan), atau melalui ADB:
+1. Unduh `incremental-traffic-madiun-android.apk` dari halaman [**GitHub Releases `v1.5.0-madiun`**](https://github.com/nafta121/studious-pancake/releases/tag/v1.5.0-madiun) atau [`releases/incremental-traffic-madiun-android.apk`](releases/incremental-traffic-madiun-android.apk), lalu pasang langsung di atas versi sebelumnya (tanpa *uninstall* agar progres `save_<map_id>.json` tetap tersimpan dan otomatis dimigrasikan ke skema `v: 3`), atau melalui ADB:
    ```bash
    adb install -r releases/incremental-traffic-madiun-android.apk
    ```
-2. Game mendukung **Auto-Rotation (Landscape `1152×648` & Portrait `480×960` DPI-adaptive)**, *edge-to-edge immersive mode*, kamera sentuh *2-finger pinch-zoom* + *inertial pan* + *double-tap zoom*, serta navigasi tombol fisik/gestur **Back** bawaan Android.
+2. Game mendukung **Auto-Rotation (Landscape `1152×648` & Portrait `480×960` DPI-adaptive)**, *edge-to-edge immersive mode*, kamera sentuh *2-finger pinch-zoom* + *inertial pan* + *double-tap zoom*, ketuk langsung truk di dunia untuk membuka `TruckInspector`, serta navigasi tombol fisik/gestur **Back** bawaan Android.
 
 ---
 
-## 🛣️ Pembaruan `v1.4.0`: `Road Shape`, `Road Size` & Arsitektur `Lanes` Asli *Incremental Traffic* (REA)
+## 🚛 Pembaruan `v1.5.0`: `Storage`, `Cargo`, `Route`, `Trucks` & `Commodity` Asli *Incremental Traffic*
 
-1. **Proporsi Eksak `Road Size` & Rasio `1.68×` Lebar Truk (`godot_src/core/road_geom.gd`)**:
-   - Seluruh ukuran jalan diturunkan langsung dari konstanta asli `CONST`, `RoadBed`, `LaneMarkings`, dan `TruckView` (`UNIT_SCALE = 0.20`): `LANE_WIDTH = 6.72` (`33.6 × 0.20`, tepat `1.68×` lebar truk `4.0`), `LANE_SEPARATION = 3.84` (`19.2 × 0.20`), `LANE_SPACING = 6.00` (`30.0 × 0.20`), `SIDEWALK = 1.76`, `CURB = 0.40`, dan `SHADOW_BAND = 1.20`.
-2. **Polilin Eksplisit Per-Lajur (`lanesFwd` / `lanesBwd`) & Kantong Belok *Cubic Hermite* (`ramp`)**:
-   - Meniru arsitektur `SimCore::set_lane` (`ram:0x180014c40` pada `simcore.windows.x86_64.dll`), setiap lajur (`1–4` sepanjang ruas jalan + `1–4` lajur pendekatan simpang / *turn pockets*) dibangun sebagai polilin mandiri dengan mekarnya kantong belok halus `ramp(a, b, x) = t²(3 - 2t)` serta 3 ukuran panjang kantong asli (`Short = 26.0`, `Medium = 52.0`, `Long = 82.0`).
-3. **`RoadBed` 3-Lapis, `RoadSurface.plaza_polygon` Asimetris Bebas Celah & Marka `LaneMarkings` Asli (`godot_src/render/map_view_25d.gd`)**:
-   - `RoadBed` 3 cincin konsentris (`Contact Shadow` → `Sidewalk #E2DED2` → `Curb #A9A59B`), poligon simpang `plaza_poly` yang menyatu presisi dari titik ujung lajur aktual (*fillet* Bezier kuadratik 8-segmen `< 145°` & busur Bezier kubik `bend(..., arc=true)` `>= 145°`), pulau bundaran rumput `#C9D8A6` (`COL_GRASS`), garis tengah tunggal `#F2F0E5` putus-putus/utuh, pulau median berarsir diagonal 45° pada `medianZones`, serta panel inspektur jalan `StreetEditor` lengkap (`$1,125` per kantong lajur simpang).
-   - Seluruh geometri jalan dikompilasi ke dalam **1 *draw batch* statis `TriBatch2D`** pada GPU ditambah shader tanah asli `road_verge.gdshader` + `city_ground.gdshaderinc` (`FastNoiseLite` `128×128`) untuk performa mulus **60–120 FPS** di Android.
+1. **Vektor 44 Komoditas `ShapeGlyphs` & Ekonomi Konservasi Nilai (`godot_src/core/shape_glyphs.gd`, `godot_src/core/catalog.gd`)**:
+   - Memporting ke-**44 bentuk vektor komoditas** (`3` Raw + `9` Tier-2 + `11` Tier-3 + `9` Tier-4 + `12` Tier-5) lengkap dengan pusat kotak pembatas `centered_offset`, orientasi muatan `truck_angle`, palet standar & Okabe-Ito `color_of`, serta *screen-space keyline skirt* (`add_keylined(..., uv_expand=true)`).
+2. **Shader `truck_part.gdshader` & `truck_ghost.gdshader` + 5 Model Armada `TruckView` (`shaders/`, `godot_src/render/map_view_25d.gd`)**:
+   - Seluruh armada dirender hanya dalam **2 *draw batch* GPU per frame** (`_truck_node` & `_truck_ghost_node`) dengan detail sasis & gandengan asli: **Hauler** (`1` trailer, `2` slot), **Freighter** (`2` trailer, kaca belah + deflektor atap, `4` slot), **Lowloader** (kabin hidung panjang + knalpot krom + `3` *flatbed* ber-*bolster* `#ECEEEA` untuk `3` barang ukuran apa pun), **Express** (hidung baji aerodinamis + V-chevron + bilah sisa bonus waktu `2×` `1.3× + 3.0s`), dan **Bulker** (*headache rack* + `2` bak curah cekung `#B4B9B3` khusus `6` bahan mentah).
+3. **Pelataran Beton `FactoryLook`, Animasi `CargoFlights` (`hop` & `crumble`), Stasiun/Pelabuhan `vehicleCargo` & Pemusnahan Kargo (`godot_src/core/sim_engine.gd`)**:
+   - Pelataran beton penyimpanan (`4 / 8 / 15 / 30 / 60` slot) di samping bangunan pemasok & pabrik dengan cap air komoditas `22%`, `Lv.0 = 1 bay`, lompatan parabolik kargo saat bongkar-muat (`hop`), pecahan `9` serpihan saat muatan dibuang (`crumble` dengan kompensasi `10%`), serta gerbong kereta & palka kapal kargo yang terisi visual `ShapeGlyphs` dari tumpukan `yardPile`.
+4. **Rute OKHSL `RouteColors`, `waypointsBack`, `RouteBreakMarks`, `Depot` & `TruckInspector` (`godot_src/ui/android_hud.gd`, `godot_src/main_game.gd`)**:
+   - Warna rute harmonis OKHSL/OKLab + garis strip bergantian di ruas jalan bersama, titik singgah terpisah pergi (`Way there`) & pulang (`Way back`), lencana diagnostik rute putus `RouteBreakMarks` (`! ROAD CLOSED / ONE-WAY / NO TURN`), bangunan **Depo Armada (`Depot`)** di ke-7 peta, serta panel **`TruckInspector`** lengkap dengan pelacakan kamera `Follow truck`, rantai kemacetan klik-langsung (`GRIDLOCK`), `Leave bay`, dan `To depot`.
 
 ---
 
-## 🔬 Fitur Paritas Penuh File Asli *Incremental Traffic* (`v1.3.0` – `v1.4.0`)
+## 🛣️ Arsitektur `Road Shape`, `Road Size` (`1.68×` Lebar Truk) & `Lanes` (`v1.4.0`)
 
-1. **Seluruh 44 Komoditas Asli & Ekonomi `Ledger`/`Industry` Presisi (`godot_src/core/catalog.gd`, `godot_src/core/sim_engine.gd`)**:
-   - Lengkap **44 bentuk komoditas** (`3` Raw Tier-1 + `9` Tier-2 + `11` Tier-3 + `9` Tier-4 + `12` Tier-5 seperti `Rocket`, `Star`, `Crown`, `Key`, `Heart`, `Spade`) dengan konservasi nilai bahan baku `$50` per input mentah (`validate_catalog()` tervalidasi `0` galat), harga jual kembali truk marginal `50%`, faktor jadwal tunggu `[1.0, 0.6, 0.3, 0.0]`, kapasitas `Low-loader` `3` slot `large`, dan biaya `Bays` eksponensial `$500 * 2^level`.
-2. **10 Berkas Shader Asli *Incremental Traffic* Berjalan Mulus di Android GLES3 (`shaders/`, `godot_src/render/map_view_25d.gd`)**:
-   - `city_ground.gdshaderinc`, `city_ground.gdshader`, & `road_verge.gdshader`: Tekstur padang rumput/pasir/butir halus prosedural dunia nyata.
-   - `city_building.gdshader` + `city_reveal.gdshaderinc`, `city_shadow.gdshader`, `leaning_roof.gdshader`, `cloud_puff.gdshader`, `rule_hints.gdshader`, & `water_ripples.gdshader`.
-3. **Gudang Penumpukan `yardPile` Stasiun (`2.0×`) & Pelabuhan (`1.6×`) (*Steam Update 1.10*)**, **Lampu Lalu Lintas Multi-Fase (`2–4` Fase)**, serta **194 Koridor Jalan Nyata WGS84 (OSRM / OpenStreetMap)** + **62 jembatan sungai nyata (`bridgeSpans`)**.
+- **Proporsi Eksak `CONST` & Polilin Per-Lajur `SimCore::set_lane` (`godot_src/core/road_geom.gd`)**: `LANE_WIDTH = 6.72` (`1.68×` lebar truk), `LANE_SEPARATION = 3.84`, `LANE_SPACING = 6.00`, mekarnya kantong belok *Cubic Hermite* `ramp(a, b, x)`, 3 cincin `RoadBed` (`Shadow` → `Sidewalk #E2DED2` → `Curb #A9A59B`), `RoadSurface.plaza_polygon` bebas celah, pulau median arsir 45°, dan shader tanah `road_verge.gdshader` + `city_ground.gdshaderinc` dalam **1 *draw batch* statis `TriBatch2D`**.
 
 ---
 
@@ -56,7 +52,7 @@ File APK rilis yang telah ditandatangani secara kriptografis (**APK Signature Sc
 
 | ID Peta | Nama Peta | Cakupan Geografis & Infrastruktur Nyata |
 | :--- | :--- | :--- |
-| `karisidenan_madiun` | **Karesidenan Madiun Terpadu** | Kampanye penuh **6 Wilayah Progresif** (47 simpang, 65 ruas jalan OSRM, 23 jembatan sungai, 31 fasilitas, Kali Bengawan Solo, Kali Madiun, Kali Gandong, Kali Grindulu, Jalur KA Lintas Selatan, Tol Trans-Jawa & JLS). |
+| `karisidenan_madiun` | **Karesidenan Madiun Terpadu** | Kampanye penuh **6 Wilayah Progresif** (47 simpang, 65 ruas jalan OSRM, 23 jembatan sungai, 31 fasilitas + Depo Armada, Kali Bengawan Solo, Kali Madiun, Kali Gandong, Kali Grindulu, Jalur KA Lintas Selatan, Tol Trans-Jawa & JLS). |
 | `kota_madiun` | **Kota Madiun (27 Kelurahan)** | Detail mikro perkotaan di **Kec. Kartoharjo, Manguharjo & Taman**: Tugu 0 KM Jl. Pahlawan, Stasiun Besar Madiun & kawasan industri kereta api, PG Rejo Agung, Pasar Besar, Bundaran Sleko, 9 jembatan Kali Madiun, Ring Road Barat & Timur. |
 | `kab_madiun` | **Kabupaten Madiun (Poros Caruban)** | Ibu kota Caruban (Mejayan), Bundaran Gerbang Tol Dumpil, Hutan Jati Alas Saradan, koridor selatan Pagotan–Geger–Dolopo, hingga perkebunan lereng Gunung Wilis (Wungu & Kare). |
 | `kab_magetan` | **Kabupaten Magetan (Kaki Gunung Lawu)** | Simpang Tiga Maospati, Stasiun Kargo Barat, Bundaran Kota Magetan, sentra kerajinan kulit, hingga tanjakan Plaosan & Telaga Sarangan di lereng Gunung Lawu. |
@@ -69,8 +65,8 @@ File APK rilis yang telah ditandatangani secara kriptografis (**APK Signature Sc
 ## 🛠️ Struktur Proyek & Cara Build Mandiri
 
 ```text
-├── project.godot                     # Konfigurasi Godot 4.7.2 (v1.4.0, gl_compatibility, Sticker theme)
-├── export_presets.cfg                # Preset ekspor APK Android v1.4.0-madiun (versionCode 140, arm64-v8a)
+├── project.godot                     # Konfigurasi Godot 4.7.2 (v1.5.0, gl_compatibility, Sticker theme)
+├── export_presets.cfg                # Preset ekspor APK Android v1.5.0-madiun (versionCode 150, arm64-v8a)
 ├── icon.svg                          # Ikon vektor asli Incremental Traffic
 ├── assets/
 │   ├── icons/                        # Android Adaptive Icons (192x192 & 432x432 safe-zone)
@@ -80,17 +76,17 @@ File APK rilis yang telah ditandatangani secara kriptografis (**APK Signature Sc
 │   ├── theme_dark.tres               # Tema UI asli "Sticker" (Gelap / Malam)
 │   └── theme_studies/fonts/          # Font asli Jost-Variable.ttf
 ├── sounds/ui/                        # 26 file efek suara UI WAV asli Incremental Traffic
-├── shaders/                          # 10 file shader asli (city_ground, road_verge, city_building, city_reveal, city_shadow, cloud_puff, rule_hints, water_ripples, leaning_roof, extrude_25d)
+├── shaders/                          # 12 file shader asli (truck_part, truck_ghost, city_ground, road_verge, city_building, city_reveal, city_shadow, cloud_puff, rule_hints, water_ripples, leaning_roof, extrude_25d)
 ├── godot_src/
-│   ├── main_game.gd                  # Orkestrator utama, input dunia, siklus hidup Android & zero-leak smoke test
-│   ├── core/                         # catalog.gd (44 goods), road_geom.gd (per-lane + plaza_polygon), pathfinder.gd, sfx_synth.gd, sim_engine.gd
-│   ├── render/                       # tri_batch.gd (CUSTOM0 + MeshInstance2D), map_view_25d.gd (RoadBed 3-ring, LaneMarkings, 2.5D shaders)
-│   └── ui/                           # it_icons.gd (44 glyphs), touch_camera.gd, android_hud.gd (StreetEditor, 6-tool RuleToolbar)
+│   ├── main_game.gd                  # Orkestrator utama, hit-test truk/waypoint, follow-cam & gameplay smoke test
+│   ├── core/                         # shape_glyphs.gd (44 vector shapes), catalog.gd (TruckModel/Ledger/RouteColors), road_geom.gd, pathfinder.gd, sfx_synth.gd, sim_engine.gd
+│   ├── render/                       # tri_batch.gd (UV keyline + CUSTOM0), map_view_25d.gd (TruckView, FactoryLook, CargoFlights, RouteBreakMarks, Depot)
+│   └── ui/                           # it_icons.gd (ShapeGlyphs + 5 TruckIcon), touch_camera.gd, android_hud.gd (TruckInspector, StreetEditor, Waypoints)
 ├── geodata/                          # Data batas wilayah, sungai & cache koridor jalan OSRM Karesidenan Madiun
-├── data/madiun_maps.json             # Paket 7 peta dunia nyata siap pakai (194 jalan OSRM, 62 jembatan, 44 komoditas)
+├── data/madiun_maps.json             # Paket 7 peta dunia nyata siap pakai (194 jalan OSRM, 62 jembatan, Depo Armada, 44 komoditas)
 ├── scripts/
 │   ├── fetch_osrm_madiun_roads.py    # Pengambil polilin jalan nyata WGS84 dari OSRM / OpenStreetMap
-│   ├── build_madiun_geodata.py       # Kompilator geometri OSRM + Chaikin B-spline + resep 44 komoditas
+│   ├── build_madiun_geodata.py       # Kompilator geometri OSRM + Chaikin B-spline + Depo + resep 44 komoditas
 │   └── build_android_apk.sh          # Skrip ekspor & penandatanganan APK Godot 4.7.2 otomatis (sertifikat terkunci)
 └── releases/
     └── incremental-traffic-madiun-android.apk
@@ -103,12 +99,12 @@ bash scripts/build_android_apk.sh
 
 ---
 
-## 🔍 Verifikasi Paket APK dengan REA (`rea-agents@6.9.0` + `JADX 0.7.1`)
+## 🔍 Verifikasi Paket APK dengan REA (`rea-agents@6.9.0` + `JADX`)
 
-File [`releases/incremental-traffic-madiun-android.apk`](releases/incremental-traffic-madiun-android.apk) (`SHA-256: 8a9c1dcb7522dcd38e89a7cbdc1b78a1e54c4a9c1c6eb63d0246742b1eab042e`, `28.087.908 byte`) telah diverifikasi secara statis menggunakan **REA**:
+File [`releases/incremental-traffic-madiun-android.apk`](releases/incremental-traffic-madiun-android.apk) (`SHA-256: 612e154d65bfce1535f8f346939a373effddde8b201c8e96e1e13fee783373af`, `28.202.930 byte`) telah diverifikasi secara statis menggunakan **REA**:
 
 | Operasi REA | Evidence ID | Temuan Terverifikasi (*Observed*) |
 | :--- | :--- | :--- |
-| `inspect-apk-signature` | `ev_de86f45859bbc7c12ce93e757bb67c08644138de3709b3bd7df405039fe17802` | Skema tanda tangan **v1 (`MADIUNRE.RSA`), v2, dan v3** lengkap dan terverifikasi oleh `apksigner verify` dengan sidik jari sertifikat tetap `7bae8ba2a722a2168c38f3faaf0a3d61df57b32700cefdf2041fd59fbf4981ce` (`Serial: 5071a11bb51cc4dc`). |
-| `inspect-artifact` | `ev_28e357bef25f7ab0076881f443fe3e11a466838f0ce5fd1753a0217f388172d7` | Graf & inventori artefak utuh (ringkasan proyeksi `ev_d2e97eb0fafecf98a1d4832a99d5381ac1b6cd6fff2125aeb88dc15e708ade46`, `200` entri APK termasuk seluruh `10` berkas shader `.gdshader`/`.gdshaderinc`, `.gdc` terkompilasi, `Jost-Variable.ttf`, `theme.tres`, `theme_dark.tres`, `26` WAV UI & `madiun_maps.json`). |
-| `inspect-android-package` | `ev_405ad98084a7090bc6251ad91f171dd74c981cf5ec118d47fe69cca7f768e5e4` | `id.madiun.incrementaltraffic`, `versionCode: 140`, `1.4.0-madiun`, `minSdk: 24` (Android 7.0+), `targetSdk: 36`, `glEsVersion: 0x30000`, izin minimal `android.permission.VIBRATE`. |
+| `inspect-apk-signature` | `ev_7690d0219cc232fa120a5ab751e3a61b9fa129443654358e5bb3a78302213eb1` | Skema tanda tangan **v1 (`MADIUNRE.RSA`), v2, dan v3** lengkap dan terverifikasi oleh `apksigner verify` dengan sidik jari sertifikat tetap `7bae8ba2a722a2168c38f3faaf0a3d61df57b32700cefdf2041fd59fbf4981ce` (`Serial: 5071a11bb51cc4dc`). |
+| `inspect-artifact` | `ev_f374f3f8cc943ff7ac1de9bdfbf8549c22cb681f1231f9a54493912b65b2be5d` | Graf & inventori artefak utuh (`204` entri APK termasuk ke-`12` berkas shader `.gdshader`/`.gdshaderinc` seperti `truck_part.gdshader` & `truck_ghost.gdshader`, `shape_glyphs.gdc` terkompilasi, `Jost-Variable.ttf`, `theme.tres`, `theme_dark.tres`, `26` WAV UI & `madiun_maps.json`). |
+| `inspect-android-package` | `ev_701af579a30202d74450c99d9298d74e90828423f026502c11ef93019be77ed4` | `id.madiun.incrementaltraffic`, `versionCode: 150`, `1.5.0-madiun`, `minSdk: 24` (Android 7.0+), `targetSdk: 36`, `glEsVersion: 0x30000`, izin minimal `android.permission.VIBRATE`. |

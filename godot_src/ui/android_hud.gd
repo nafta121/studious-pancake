@@ -23,7 +23,8 @@ var map_view: MapView25D
 var dark_mode: bool = false
 var perf_preset: String = "balanced"
 var lane_dir_mode: String = "both" # "both", "forward", "backward"
-var current_drawer: String = "" # "", "facility", "junction", "road", "routes", "trucks", "alerts", "offers", "goals", "maps", "overlays", "settings"
+var current_drawer: String = "" # "", "facility", "truck", "junction", "road", "routes", "trucks", "alerts", "offers", "goals", "maps", "overlays", "settings"
+var follow_truck_id: String = ""
 
 var _theme_light: Theme
 var _theme_dark: Theme
@@ -951,6 +952,8 @@ func _process(delta: float) -> void:
 			_refresh_modal_header_and_graph()
 		elif _inspector_panel.visible and current_drawer == "facility":
 			_update_facility_live_widgets()
+		elif _inspector_panel.visible and current_drawer == "truck":
+			_update_truck_live_widgets()
 
 func show_toast_banner(msg: String, duration: float = 2.6) -> void:
 	if msg == "":
@@ -1296,6 +1299,9 @@ func open_drawer(kind: String) -> void:
 
 func close_drawer() -> void:
 	var was_open: bool = current_drawer != ""
+	if current_drawer == "truck" and map_view != null:
+		map_view.selected_truck_id = ""
+		follow_truck_id = ""
 	current_drawer = ""
 	_inspector_panel.visible = false
 	_modal_panel.visible = false
@@ -1316,6 +1322,8 @@ func _populate_drawer() -> void:
 
 	if current_drawer == "facility":
 		_build_authentic_factory_panel()
+	elif current_drawer == "truck":
+		_build_authentic_truck_panel()
 	elif current_drawer == "junction":
 		_build_authentic_junction_panel()
 	elif current_drawer == "road":
@@ -1462,6 +1470,14 @@ func _build_authentic_factory_panel() -> void:
 		hub_lbl.text = "Regional Market / Export Hub — Pays full cash value on every delivered cargo unit and counts toward Regional Unlock Goals!"
 		hub_card.add_child(hub_lbl)
 		_inspector_body.add_child(hub_card)
+
+	var scrapped_n: int = int(f.get("scrappedCount", 0))
+	if scrapped_n > 0:
+		var scr_lbl := Label.new()
+		scr_lbl.theme_type_variation = &"CaptionLabel"
+		scr_lbl.text = "⚠ Scrapped at full storage bay: %d cargo (10%% salvage)" % scrapped_n
+		scr_lbl.add_theme_color_override("font_color", _status_col(&"warn", Color("8F5A00")))
+		_inspector_body.add_child(scr_lbl)
 
 	_inspector_body.add_child(HSeparator.new())
 
@@ -1772,28 +1788,76 @@ func _build_route_card_for_factory(rt: Dictionary, is_incoming: bool) -> PanelCo
 			quote_row.add_child(exec_swap)
 			rcol.add_child(quote_row)
 
+	# Clickable Fleet Truck Chips -> tap any truck to open TruckInspector directly!
+	var tids: Array = rt.get("activeTruckIds", [])
+	if not tids.is_empty():
+		var chip_flow := HFlowContainer.new()
+		chip_flow.add_theme_constant_override("h_separation", 4)
+		chip_flow.add_theme_constant_override("v_separation", 4)
+		var show_tids: int = mini(8, tids.size())
+		for ti in range(show_tids):
+			var tid_s := String(tids[ti])
+			var ag_t: Dictionary = sim.get_agent(tid_s)
+			var chip_b := Button.new()
+			chip_b.theme_type_variation = &"QuietButton"
+			chip_b.focus_mode = Control.FOCUS_NONE
+			var has_c: bool = not ag_t.is_empty() and int(ag_t.get("cargoQty", 0)) > 0
+			chip_b.text = ("🚚#%d•" if has_c else "🚚#%d") % (ti + 1)
+			chip_b.pressed.connect(func():
+				if not ag_t.is_empty():
+					focus_world_requested.emit(ag_t["pos"])
+					map_view.selected_truck_id = tid_s
+					map_view.selected_facility_id = ""
+					open_drawer("truck")
+			)
+			chip_flow.add_child(chip_b)
+		if tids.size() > show_tids:
+			var more_l := Label.new()
+			more_l.theme_type_variation = &"CaptionLabel"
+			more_l.text = "+%d" % (tids.size() - show_tids)
+			chip_flow.add_child(more_l)
+		rcol.add_child(chip_flow)
+
 	# Bottom quick actions: Edit path / Waypoints, Same way back, Clear WP & Retire
 	var r3 := HBoxContainer.new()
 	r3.add_theme_constant_override("separation", 4)
+	var swb_on: bool = bool(rt.get("sameWayBack", true))
 	var wp_cnt: int = (rt["waypoints"] as Array).size()
+	var wp_back_cnt: int = (rt.get("waypointsBack", []) as Array).size()
 	var wp_btn := Button.new()
 	wp_btn.theme_type_variation = &"QuietButton"
 	wp_btn.focus_mode = Control.FOCUS_NONE
-	wp_btn.text = "Path (%d WP)" % wp_cnt
+	wp_btn.text = ("Path (%d WP)" % wp_cnt) if swb_on else ("Path (%d/%d WP)" % [wp_cnt, wp_back_cnt])
 	wp_btn.pressed.connect(func():
 		map_view.selected_route_id = rtid
-		open_drawer("routes")
-		show_toast_banner("Route highlighted! Tap any road junction to add/remove a waypoint.", 3.0)
+		map_view.editing_return_waypoints = false
+		close_drawer()
+		show_toast_banner("Route highlighted! Tap any road junction on map to add/remove a waypoint.", 3.2)
 	)
 	r3.add_child(wp_btn)
 
-	if wp_cnt > 0:
+	if not swb_on:
+		var ret_wp_btn := Button.new()
+		ret_wp_btn.theme_type_variation = &"QuietButton"
+		ret_wp_btn.focus_mode = Control.FOCUS_NONE
+		ret_wp_btn.text = "Edit Return"
+		ret_wp_btn.pressed.connect(func():
+			map_view.selected_route_id = rtid
+			map_view.editing_return_waypoints = true
+			close_drawer()
+			show_toast_banner("Editing RETURN leg! Tap any road junction to add/remove return waypoints.", 3.2)
+		)
+		r3.add_child(ret_wp_btn)
+
+	if wp_cnt > 0 or (not swb_on and wp_back_cnt > 0):
 		var clr_wp := Button.new()
 		clr_wp.theme_type_variation = &"QuietButton"
 		clr_wp.focus_mode = Control.FOCUS_NONE
 		clr_wp.text = "Clear WP"
 		clr_wp.pressed.connect(func():
-			sim.clear_route_waypoints(rtid)
+			sim.clear_route_waypoints(rtid, false)
+			if not swb_on:
+				sim.clear_route_waypoints(rtid, true)
 			_populate_drawer()
 		)
 		r3.add_child(clr_wp)
@@ -1801,9 +1865,11 @@ func _build_route_card_for_factory(rt: Dictionary, is_incoming: bool) -> PanelCo
 	var swb_chk := CheckBox.new()
 	swb_chk.focus_mode = Control.FOCUS_NONE
 	swb_chk.text = "Same back"
-	swb_chk.set_pressed_no_signal(bool(rt.get("sameWayBack", true)))
+	swb_chk.set_pressed_no_signal(swb_on)
 	swb_chk.toggled.connect(func(on: bool):
 		sim.set_route_same_way_back(rtid, on)
+		if on:
+			map_view.editing_return_waypoints = false
 		_populate_drawer()
 	)
 	r3.add_child(swb_chk)
@@ -1826,6 +1892,315 @@ func _build_route_card_for_factory(rt: Dictionary, is_incoming: bool) -> PanelCo
 	rcol.add_child(r3)
 
 	return rcard
+
+
+# === 1B. AUTHENTIC TRUCK INSPECTOR PANEL (`truck_inspector.gd`) ===
+
+var _live_trk_speed_lbl: Label = null
+var _live_trk_cargo_lbl: Label = null
+var _live_trk_exp_bar: ProgressBar = null
+var _live_trk_exp_lbl: Label = null
+var _live_trk_diag_status: Label = null
+var _live_trk_diag_wait: Label = null
+
+func _build_authentic_truck_panel() -> void:
+	var tid := map_view.selected_truck_id
+	var ag: Dictionary = sim.get_agent(tid)
+	if ag.is_empty():
+		close_drawer()
+		return
+
+	var m_id := String(ag["model"])
+	var tdef: Dictionary = GameCatalog.TRUCKS[m_id]
+	var rtid := String(ag["routeId"])
+	var rt: Dictionary = sim.get_route(rtid)
+	var diag: Dictionary = sim.diagnose_agent(ag)
+
+	_inspector_title.text = "%s · %s" % [String(tdef["name"]), tid.to_upper()]
+
+	_inspector_status_pill.visible = true
+	var pill_sb := StyleBoxFlat.new()
+	pill_sb.set_corner_radius_all(999)
+	pill_sb.content_margin_left = 10.0
+	pill_sb.content_margin_right = 10.0
+	pill_sb.content_margin_top = 2.0
+	pill_sb.content_margin_bottom = 2.0
+	if bool(diag.get("isGridlock", false)):
+		pill_sb.bg_color = Color(0.83, 0.22, 0.23, 0.20)
+		_inspector_status_lbl.text = "• GRIDLOCK"
+		_inspector_status_lbl.add_theme_color_override("font_color", _status_col(&"bad", Color("C2412F")))
+	elif String(diag.get("waiting", "")) != "" and String(ag.get("waitReason", "none")) != "none":
+		pill_sb.bg_color = Color(0.88, 0.60, 0.16, 0.20)
+		_inspector_status_lbl.text = "• Waiting"
+		_inspector_status_lbl.add_theme_color_override("font_color", _status_col(&"warn", Color("8F5A00")))
+	else:
+		pill_sb.bg_color = Color(0.17, 0.45, 0.26, 0.15)
+		_inspector_status_lbl.text = "• Active"
+		_inspector_status_lbl.add_theme_color_override("font_color", _status_col(&"good", Color("2C7442")))
+	_inspector_status_pill.add_theme_stylebox_override("panel", pill_sb)
+
+	var rt_nm: String = String(rt.get("name", "Route"))
+	_inspector_sub.text = "%s · %s · Upkeep $%d/min" % [
+		rt_nm, GameCatalog.describe_truck_capacity(m_id), int(tdef["upkeep_min"])
+	]
+
+	# Card 1: Silhouette + Live Speed + Cargo Load + Express Bonus Timer
+	var c_card := PanelContainer.new()
+	c_card.theme_type_variation = &"CardPanel"
+	var c_col := VBoxContainer.new()
+	c_col.add_theme_constant_override("separation", 6)
+	c_card.add_child(c_col)
+
+	var top_r := HBoxContainer.new()
+	top_r.add_theme_constant_override("separation", 10)
+	c_col.add_child(top_r)
+
+	var mt := _MiniTruckWidget.new()
+	mt.model_id = m_id
+	mt.cab_col = rt.get("color", tdef["color"]) as Color
+	var c_good := String(ag.get("cargoGood", ""))
+	mt.good_id = c_good if GameCatalog.GOODS.has(c_good) else ""
+	mt.truck_h = 22.0
+	top_r.add_child(mt)
+
+	var spd_lbl := Label.new()
+	spd_lbl.theme_type_variation = &"MonoLabel"
+	spd_lbl.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_live_trk_speed_lbl = spd_lbl
+	top_r.add_child(spd_lbl)
+
+	var cargo_row := HBoxContainer.new()
+	cargo_row.add_theme_constant_override("separation", 6)
+	c_col.add_child(cargo_row)
+	if c_good != "" and int(ag.get("cargoQty", 0)) > 0 and GameCatalog.GOODS.has(c_good):
+		for _ci in range(mini(6, int(ag["cargoQty"]))):
+			var gw := _GoodGlyphWidget.new()
+			gw.good_id = c_good
+			gw.custom_minimum_size = Vector2(18, 18)
+			cargo_row.add_child(gw)
+	var cargo_lbl := Label.new()
+	cargo_lbl.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	cargo_lbl.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	_live_trk_cargo_lbl = cargo_lbl
+	cargo_row.add_child(cargo_lbl)
+
+	_live_trk_exp_bar = null
+	_live_trk_exp_lbl = null
+	if bool(tdef["express_bonus"]):
+		var exp_l := Label.new()
+		exp_l.theme_type_variation = &"MonoLabel"
+		_live_trk_exp_lbl = exp_l
+		c_col.add_child(exp_l)
+		var exp_b := ProgressBar.new()
+		exp_b.show_percentage = false
+		exp_b.max_value = 1.0
+		exp_b.custom_minimum_size = Vector2(0, 8)
+		_live_trk_exp_bar = exp_b
+		c_col.add_child(exp_b)
+
+	_inspector_body.add_child(c_card)
+
+	# Card 2: Live Traffic & Bay Diagnosis + Clickable Waiting Chain (`truck_inspector.gd`)
+	var d_card := PanelContainer.new()
+	d_card.theme_type_variation = &"CardPanel"
+	var d_col := VBoxContainer.new()
+	d_col.add_theme_constant_override("separation", 5)
+	d_card.add_child(d_col)
+
+	var d_title := Label.new()
+	d_title.theme_type_variation = &"SectionLabel"
+	d_title.text = "Status & Diagnosis"
+	d_col.add_child(d_title)
+
+	var st_lbl := Label.new()
+	st_lbl.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	_live_trk_diag_status = st_lbl
+	d_col.add_child(st_lbl)
+
+	var wt_lbl := Label.new()
+	wt_lbl.theme_type_variation = &"CaptionLabel"
+	wt_lbl.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	_live_trk_diag_wait = wt_lbl
+	d_col.add_child(wt_lbl)
+
+	var chain_links: Array = diag.get("chain", [])
+	if not chain_links.is_empty():
+		var ch_row := HFlowContainer.new()
+		ch_row.add_theme_constant_override("h_separation", 4)
+		ch_row.add_theme_constant_override("v_separation", 4)
+		var ch_cap := Label.new()
+		ch_cap.theme_type_variation = &"CaptionLabel"
+		ch_cap.text = "Waiting chain:"
+		ch_row.add_child(ch_cap)
+		for lk in chain_links:
+			var bid := String(lk["toId"])
+			var cb_btn := Button.new()
+			cb_btn.theme_type_variation = &"QuietButton"
+			cb_btn.focus_mode = Control.FOCUS_NONE
+			cb_btn.text = "→ " + bid.to_upper()
+			cb_btn.pressed.connect(func():
+				var blk_ag: Dictionary = sim.get_agent(bid)
+				if not blk_ag.is_empty():
+					focus_world_requested.emit(blk_ag["pos"])
+					map_view.selected_truck_id = bid
+					_populate_drawer()
+			)
+			ch_row.add_child(cb_btn)
+		d_col.add_child(ch_row)
+
+	_inspector_body.add_child(d_card)
+	_inspector_body.add_child(HSeparator.new())
+
+	# Action Grid (`Follow`, `Go to cause`, `Leave bay`, `To depot`, `Open route`, `Swap route's model`, `Sell +$X`)
+	var act_lbl := Label.new()
+	act_lbl.theme_type_variation = &"SectionLabel"
+	act_lbl.text = "Fleet Interventions"
+	_inspector_body.add_child(act_lbl)
+
+	var act_grid := GridContainer.new()
+	act_grid.columns = 2
+	act_grid.add_theme_constant_override("h_separation", 8)
+	act_grid.add_theme_constant_override("v_separation", 8)
+	_inspector_body.add_child(act_grid)
+
+	var flw_btn := Button.new()
+	flw_btn.toggle_mode = true
+	flw_btn.focus_mode = Control.FOCUS_NONE
+	flw_btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	flw_btn.custom_minimum_size = Vector2(0, 38)
+	flw_btn.set_pressed_no_signal(follow_truck_id == tid)
+	flw_btn.text = "◎ Following" if follow_truck_id == tid else "◎ Follow truck"
+	flw_btn.toggled.connect(func(on: bool):
+		follow_truck_id = tid if on else ""
+		_populate_drawer()
+	)
+	act_grid.add_child(flw_btn)
+
+	var cause_btn := Button.new()
+	cause_btn.focus_mode = Control.FOCUS_NONE
+	cause_btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	cause_btn.custom_minimum_size = Vector2(0, 38)
+	cause_btn.text = "⌖ Go to cause"
+	cause_btn.disabled = not bool(diag.get("hasCause", false))
+	cause_btn.pressed.connect(func():
+		var d_now: Dictionary = sim.diagnose_agent(sim.get_agent(tid))
+		if bool(d_now.get("hasCause", false)):
+			follow_truck_id = ""
+			focus_world_requested.emit(d_now["causePos"])
+	)
+	act_grid.add_child(cause_btn)
+
+	var st_s := String(ag.get("state", ""))
+	var leave_btn := Button.new()
+	leave_btn.focus_mode = Control.FOCUS_NONE
+	leave_btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	leave_btn.custom_minimum_size = Vector2(0, 38)
+	leave_btn.text = "⇢ Leave bay"
+	leave_btn.disabled = st_s not in ["loading", "queuing_bay", "unloading"]
+	leave_btn.pressed.connect(func():
+		if sim.leave_bay_early(tid):
+			show_toast_banner("Truck ordered to leave bay immediately.", 2.2)
+			_populate_drawer()
+	)
+	act_grid.add_child(leave_btn)
+
+	var dep_btn := Button.new()
+	dep_btn.focus_mode = Control.FOCUS_NONE
+	dep_btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	dep_btn.custom_minimum_size = Vector2(0, 38)
+	dep_btn.text = "⌂ To depot"
+	dep_btn.disabled = st_s in ["driving_to_depot", "at_depot"] or sim.depot.is_empty()
+	dep_btn.pressed.connect(func():
+		if sim.send_agent_to_depot(tid):
+			show_toast_banner("Truck dispatched to Starter Town Depot.", 2.4)
+			_populate_drawer()
+	)
+	act_grid.add_child(dep_btn)
+
+	var open_rt := Button.new()
+	open_rt.focus_mode = Control.FOCUS_NONE
+	open_rt.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	open_rt.custom_minimum_size = Vector2(0, 38)
+	open_rt.text = "⇄ Open route"
+	open_rt.pressed.connect(func():
+		map_view.selected_route_id = rtid
+		open_drawer("routes")
+	)
+	act_grid.add_child(open_rt)
+
+	var swap_rt := Button.new()
+	swap_rt.focus_mode = Control.FOCUS_NONE
+	swap_rt.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	swap_rt.custom_minimum_size = Vector2(0, 38)
+	swap_rt.text = "⟳ Swap model"
+	swap_rt.pressed.connect(func():
+		_overview_swap_route_id = rtid
+		map_view.selected_route_id = rtid
+		open_drawer("routes")
+	)
+	act_grid.add_child(swap_rt)
+
+	var resale_v: int = sim.get_agent_resale_value(ag)
+	var sell_trk := Button.new()
+	sell_trk.focus_mode = Control.FOCUS_NONE
+	sell_trk.custom_minimum_size = Vector2(0, 38)
+	sell_trk.text = "Sell truck (+" + GameCatalog.fmt_cash(resale_v) + ")"
+	sell_trk.add_theme_color_override("font_color", _status_col(&"bad", Color("C2412F")))
+	sell_trk.set_meta(&"sfx", "sell")
+	sell_trk.pressed.connect(func():
+		sim.sell_agent(tid)
+		close_drawer()
+	)
+	_inspector_body.add_child(sell_trk)
+
+	_update_truck_live_widgets()
+
+func _update_truck_live_widgets() -> void:
+	var tid := map_view.selected_truck_id
+	var ag: Dictionary = sim.get_agent(tid)
+	if ag.is_empty():
+		close_drawer()
+		return
+	var m_id := String(ag["model"])
+	var tdef: Dictionary = GameCatalog.TRUCKS[m_id]
+	var max_px: float = maxf(1.0, float(tdef["max_speed_px"]))
+	var cur_kmh: int = int(round((float(ag.get("speedPx", 0.0)) / max_px) * float(tdef["speed_kmh"])))
+	if _live_trk_speed_lbl != null and is_instance_valid(_live_trk_speed_lbl):
+		_live_trk_speed_lbl.text = "%d / %d km/h" % [cur_kmh, int(tdef["speed_kmh"])]
+
+	if _live_trk_cargo_lbl != null and is_instance_valid(_live_trk_cargo_lbl):
+		var cg := String(ag.get("cargoGood", ""))
+		var cq: int = int(ag.get("cargoQty", 0))
+		if cg != "" and cq > 0 and GameCatalog.GOODS.has(cg):
+			var gdef: Dictionary = GameCatalog.GOODS[cg]
+			var sz_tag := "large · 2 slots" if int(gdef["slots"]) >= 2 else "small · 1 slot"
+			_live_trk_cargo_lbl.text = "%d × %s (%s) — %s" % [cq, String(gdef["name"]), String(gdef["local"]), sz_tag]
+		else:
+			_live_trk_cargo_lbl.text = "Empty trailer"
+
+	if _live_trk_exp_bar != null and is_instance_valid(_live_trk_exp_bar):
+		var exp_left: float = sim.get_agent_express_bonus_left(ag)
+		if exp_left < 0.0:
+			_live_trk_exp_bar.value = 0.0
+			_live_trk_exp_lbl.text = "Express 2× bonus: inactive (no cargo)"
+		elif exp_left > 0.0:
+			_live_trk_exp_bar.value = exp_left
+			var locked: bool = float(ag.get("expressBonusLocked", -1.0)) >= 0.0
+			_live_trk_exp_lbl.text = ("Express 2× bonus LOCKED (%d%%)" if locked else "Express 2× deadline: %d%% left") % int(round(exp_left * 100.0))
+		else:
+			_live_trk_exp_bar.value = 0.0
+			_live_trk_exp_lbl.text = "Express 2× bonus: Missed (1× base value)"
+
+	var diag: Dictionary = sim.diagnose_agent(ag)
+	if _live_trk_diag_status != null and is_instance_valid(_live_trk_diag_status):
+		_live_trk_diag_status.text = String(diag.get("status", "Driving"))
+	if _live_trk_diag_wait != null and is_instance_valid(_live_trk_diag_wait):
+		var w_s := String(diag.get("waiting", ""))
+		_live_trk_diag_wait.text = w_s if w_s != "" else "Clear road ahead — cruising normally."
+		_live_trk_diag_wait.add_theme_color_override(
+			"font_color",
+			_status_col(&"bad" if bool(diag.get("isGridlock", false)) else (&"warn" if w_s != "" else &"text_muted"), Color("625F57"))
+		)
 
 func _update_facility_live_widgets() -> void:
 	var fid := map_view.selected_facility_id
@@ -2426,6 +2801,7 @@ func _build_overview_routes_tab() -> void:
 			if not f0.is_empty():
 				focus_world_requested.emit(f0["pos"])
 			map_view.selected_route_id = rtid
+			map_view.editing_return_waypoints = false
 			close_drawer()
 		)
 		actions.add_child(show_b)
@@ -2450,19 +2826,48 @@ func _build_overview_routes_tab() -> void:
 			br_lbl.add_theme_color_override("font_color", _status_col(&"bad", Color("C2412F")))
 			sub_row.add_child(br_lbl)
 
+		var swb_on: bool = bool(rt.get("sameWayBack", true))
 		var wp_cnt: int = (rt["waypoints"] as Array).size()
+		var wp_back_cnt: int = (rt.get("waypointsBack", []) as Array).size()
 		var wp_lbl := Label.new()
 		wp_lbl.theme_type_variation = &"CaptionLabel"
-		wp_lbl.text = "Waypoints: %d" % wp_cnt
+		wp_lbl.text = ("Waypoints: %d" % wp_cnt) if swb_on else ("Way there: %d · Way back: %d" % [wp_cnt, wp_back_cnt])
 		sub_row.add_child(wp_lbl)
 
-		if wp_cnt > 0:
+		if not swb_on:
+			var edit_there := Button.new()
+			edit_there.theme_type_variation = &"QuietButton"
+			edit_there.focus_mode = Control.FOCUS_NONE
+			edit_there.text = "Edit way there"
+			edit_there.pressed.connect(func():
+				map_view.selected_route_id = rtid
+				map_view.editing_return_waypoints = false
+				close_drawer()
+				show_toast_banner("Editing WAY THERE — tap junctions on map!", 2.8)
+			)
+			sub_row.add_child(edit_there)
+
+			var edit_back := Button.new()
+			edit_back.theme_type_variation = &"QuietButton"
+			edit_back.focus_mode = Control.FOCUS_NONE
+			edit_back.text = "Edit way back"
+			edit_back.pressed.connect(func():
+				map_view.selected_route_id = rtid
+				map_view.editing_return_waypoints = true
+				close_drawer()
+				show_toast_banner("Editing WAY BACK — tap junctions on map!", 2.8)
+			)
+			sub_row.add_child(edit_back)
+
+		if wp_cnt > 0 or (not swb_on and wp_back_cnt > 0):
 			var clr_b := Button.new()
 			clr_b.theme_type_variation = &"QuietButton"
 			clr_b.focus_mode = Control.FOCUS_NONE
 			clr_b.text = "Clear waypoints"
 			clr_b.pressed.connect(func():
-				sim.clear_route_waypoints(rtid)
+				sim.clear_route_waypoints(rtid, false)
+				if not swb_on:
+					sim.clear_route_waypoints(rtid, true)
 				_build_overview_routes_tab()
 			)
 			sub_row.add_child(clr_b)
@@ -2470,13 +2875,41 @@ func _build_overview_routes_tab() -> void:
 		var swb_c := CheckBox.new()
 		swb_c.focus_mode = Control.FOCUS_NONE
 		swb_c.text = "Same way back"
-		swb_c.set_pressed_no_signal(bool(rt.get("sameWayBack", true)))
+		swb_c.set_pressed_no_signal(swb_on)
 		swb_c.toggled.connect(func(on: bool):
 			sim.set_route_same_way_back(rtid, on)
+			if on:
+				map_view.editing_return_waypoints = false
 			_build_overview_routes_tab()
 		)
 		sub_row.add_child(swb_c)
 		vbox.add_child(sub_row)
+
+		var rt_tids: Array = rt.get("activeTruckIds", [])
+		if not rt_tids.is_empty():
+			var t_flow := HFlowContainer.new()
+			t_flow.add_theme_constant_override("h_separation", 5)
+			t_flow.add_theme_constant_override("v_separation", 4)
+			var t_cap := Label.new()
+			t_cap.theme_type_variation = &"CaptionLabel"
+			t_cap.text = "Inspect truck:"
+			t_flow.add_child(t_cap)
+			var show_n: int = mini(10, rt_tids.size())
+			for ti in range(show_n):
+				var tid_s := String(rt_tids[ti])
+				var ag_i: Dictionary = sim.get_agent(tid_s)
+				var tb_i := Button.new()
+				tb_i.theme_type_variation = &"QuietButton"
+				tb_i.focus_mode = Control.FOCUS_NONE
+				tb_i.text = "#%d (%s)" % [ti + 1, tid_s.to_upper()]
+				tb_i.pressed.connect(func():
+					if not ag_i.is_empty():
+						focus_world_requested.emit(ag_i["pos"])
+						map_view.selected_truck_id = tid_s
+						open_drawer("truck")
+				)
+				t_flow.add_child(tb_i)
+			vbox.add_child(t_flow)
 
 		if _overview_swap_route_id == rtid:
 			var sw_row := HBoxContainer.new()
@@ -2486,11 +2919,13 @@ func _build_overview_routes_tab() -> void:
 					continue
 				var q: Dictionary = sim.quote_route_model_swap(rtid, cand_m)
 				var net: int = int(q["netCost"])
+				var compat: bool = bool(q.get("compatible", true))
 				var cdef: Dictionary = GameCatalog.TRUCKS[cand_m]
 				var sb := Button.new()
 				sb.focus_mode = Control.FOCUS_NONE
 				sb.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-				sb.text = "⇄ %s (%s)" % [String(cdef["name"]), ("-" + GameCatalog.fmt_cash(net)) if net >= 0 else ("+" + GameCatalog.fmt_cash(-net))]
+				sb.disabled = not compat
+				sb.text = ("⇄ %s (Raw only)" % String(cdef["name"])) if not compat else ("⇄ %s (%s)" % [String(cdef["name"]), ("-" + GameCatalog.fmt_cash(net)) if net >= 0 else ("+" + GameCatalog.fmt_cash(-net))])
 				sb.pressed.connect(func():
 					if sim.apply_route_model_swap(rtid, cand_m):
 						if sim.sfx:
@@ -2548,14 +2983,14 @@ func _build_overview_trucks_tab() -> void:
 		var sub := Label.new()
 		sub.theme_type_variation = &"CaptionLabel"
 		sub.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-		sub.text = String(tdef["subtitle"])
+		sub.text = "%s · %s" % [String(tdef["subtitle"]), String(tdef.get("agility_label", "Agility: medium"))]
 		col.add_child(sub)
 
 		var stats := Label.new()
 		stats.theme_type_variation = &"MonoLabel"
 		stats.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-		stats.text = "%d km/h · %d slots · upkeep $%d/min · owned: %d · next: %s" % [
-			int(tdef["speed_kmh"]), int(tdef["slot_cap"]), int(tdef["upkeep_min"]), owned, GameCatalog.fmt_cash(nxt_p)
+		stats.text = "%d km/h · %s · upkeep $%d/min · owned: %d · next: %s" % [
+			int(tdef["speed_kmh"]), GameCatalog.describe_truck_capacity(m_id), int(tdef["upkeep_min"]), owned, GameCatalog.fmt_cash(nxt_p)
 		]
 		col.add_child(stats)
 

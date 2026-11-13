@@ -157,6 +157,67 @@ func add_polygon_safe(poly: PackedVector2Array, col: Color) -> void:
 		for i in range(poly.size()):
 			add_tri(c, poly[i], poly[(i + 1) % poly.size()], col)
 
+func stamp(src: TriBatch2D, xform: Transform2D = Transform2D.IDENTITY, override_col := Color.TRANSPARENT) -> void:
+	if src == null or src.indices.is_empty():
+		return
+	var base: int = verts.size()
+	var n_v: int = src.verts.size()
+	var rot_scale: float = maxf(0.0001, xform.get_scale().x)
+	var uv_xform := Transform2D(xform.x / rot_scale, xform.y / rot_scale, Vector2.ZERO)
+	for i in range(n_v):
+		verts.append(xform * src.verts[i])
+		colors.append(override_col if override_col.a > 0.0 else src.colors[i])
+		var suv: Vector2 = src.uvs[i]
+		uvs.append(uv_xform * suv if suv != Vector2.ZERO else Vector2.ZERO)
+		_push_c0(Color(0, 0, 0, 0))
+	for idx in src.indices:
+		indices.append(base + idx)
+
+## Authentic port of original TriBatch._oDZKqyP51Mpz: polygon + outward UV-normal skirt for screen-space keyline shader (`truck_part.gdshader`)
+func add_uv_keyline_poly(raw_pts: PackedVector2Array, col: Color, uv_scale: float = 1.0) -> void:
+	var pts := PackedVector2Array()
+	for p in raw_pts:
+		if pts.is_empty() or pts[pts.size() - 1].distance_squared_to(p) > 0.0001:
+			pts.append(p)
+	if pts.size() > 1 and pts[0].distance_squared_to(pts[pts.size() - 1]) <= 0.0001:
+		pts.remove_at(pts.size() - 1)
+	var n: int = pts.size()
+	if n < 3:
+		return
+	add_polygon_safe(pts, col)
+	var area: float = 0.0
+	for i in range(n):
+		area += pts[i].cross(pts[(i + 1) % n])
+	var sgn: float = -1.0 if area > 0.0 else 1.0
+	var normals := PackedVector2Array()
+	for i in range(n):
+		var d: Vector2 = pts[i].direction_to(pts[(i + 1) % n])
+		normals.append(Vector2(-d.y, d.x) * (sgn * uv_scale))
+	for i in range(n):
+		var a: Vector2 = pts[i]
+		var b: Vector2 = pts[(i + 1) % n]
+		var nrm: Vector2 = normals[i]
+		add_quad(a, b, b, a, col, Vector2.ZERO, Vector2.ZERO, nrm, nrm)
+		var nxt: Vector2 = normals[(i + 1) % n]
+		var turn: float = nrm.angle_to(nxt)
+		if absf(turn) < 0.01:
+			continue
+		var steps: int = maxi(1, ceili(absf(turn) / (PI / 8.0)))
+		var c_idx: int = verts.size()
+		verts.append(b)
+		colors.append(col)
+		uvs.append(Vector2.ZERO)
+		_push_c0(Color(0, 0, 0, 0))
+		for k in range(steps + 1):
+			verts.append(b)
+			colors.append(col)
+			uvs.append(nrm.rotated(turn * float(k) / float(steps)))
+			_push_c0(Color(0, 0, 0, 0))
+		for k in range(steps):
+			indices.append(c_idx)
+			indices.append(c_idx + 1 + k)
+			indices.append(c_idx + 2 + k)
+
 func add_arc_strip(center: Vector2, radius: float, width: float, a_start: float, a_end: float, col: Color, segs: int = 16) -> void:
 	if absf(a_end - a_start) < 0.001 or segs < 1:
 		return
@@ -248,6 +309,14 @@ func add_smooth_strip(pts: PackedVector2Array, width: float, col: Color, closed_
 
 func add_polyline(pts: PackedVector2Array, width: float, col: Color, closed_loop: bool = false, round_caps: bool = true) -> void:
 	add_smooth_strip(pts, width, col, closed_loop, round_caps, 0.0)
+
+func add_thick_line(a: Vector2, b: Vector2, width: float, col: Color) -> void:
+	var d: Vector2 = b - a
+	var l: float = d.length()
+	if l < 0.0001:
+		return
+	var nrm := Vector2(-d.y / l, d.x / l) * (width * 0.5)
+	add_quad(a - nrm, a + nrm, b + nrm, b - nrm, col)
 
 func add_dashed_polyline(pts: PackedVector2Array, width: float, col: Color, dash_len: float = 9.0, gap_len: float = 8.0, lateral_offset: float = 0.0) -> void:
 	var n: int = pts.size()

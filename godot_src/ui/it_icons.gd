@@ -37,33 +37,14 @@ const MADIUN_CRESTS := {
 static var _shape_cache: Dictionary = {}
 static var _outline_cache: Dictionary = {}
 
-static func color_of(good: String) -> Color:
-	return _get_shape(good)["main"]
+static func color_of(good: String, colorblind: bool = false) -> Color:
+	return ShapeGlyphs.color_of(good, colorblind)
 
 static func truck_angle(good: String) -> float:
-	return float(TRUCK_ANGLES.get(good, PI * 0.5))
+	return ShapeGlyphs.truck_angle(good)
 
-static func draw_shape(ci: CanvasItem, good: String, center: Vector2, size: float, angle: float = 0.0, outline: Color = Color.TRANSPARENT, outline_px: float = 1.2) -> void:
-	if size <= 0.5:
-		return
-	var s: Dictionary = _get_shape(good)
-	var xf := Transform2D(angle, Vector2.ONE * (size / 100.0), 0.0, center)
-	ci.draw_set_transform_matrix(xf)
-	if outline.a > 0.0:
-		var ow: float = outline_px * 100.0 / size
-		for op in _get_outline_polys(good, ow):
-			ci.draw_colored_polygon(op, outline)
-	for part in s["parts"]:
-		ci.draw_colored_polygon(part[0], part[1])
-	for o in s["outlines"]:
-		var closed: PackedVector2Array = (o as PackedVector2Array).duplicate()
-		closed.append(o[0])
-		ci.draw_polyline(closed, SEAM, 2.0)
-	for seam in s["seams"]:
-		ci.draw_line(seam[0], seam[1], seam[2], float(seam[3]))
-	for ring in s["rings"]:
-		ci.draw_arc(ring[0], float(ring[1]), 0.0, TAU, CIRCLE_STEPS, SEAM, 2.5)
-	ci.draw_set_transform_matrix(Transform2D.IDENTITY)
+static func draw_shape(ci: CanvasItem, good: String, center: Vector2, size: float, angle: float = 0.0, outline: Color = Color.TRANSPARENT, outline_px: float = 1.2, colorblind: bool = false) -> void:
+	ShapeGlyphs.draw(ci, good, center, size, angle, outline, outline_px, Transform2D.IDENTITY, colorblind)
 
 static func _get_outline_polys(good: String, width: float) -> Array:
 	var w_key: int = maxi(1, roundi(width * 2.0))
@@ -549,7 +530,7 @@ static func _cubic_bez(a: Vector2, b: Vector2, c: Vector2, d: Vector2, t: float)
 	var u: float = 1.0 - t
 	return a * (u * u * u) + b * (3.0 * u * u * t) + c * (3.0 * u * t * t) + d * (t * t * t)
 
-# === MINI ARTICULATED TRUCK DIAGRAM (TruckIcon._draw) ===
+# === MINI ARTICULATED TRUCK DIAGRAM (Authentic TruckIcon._draw for all 5 TruckModels) ===
 
 static func draw_mini_truck(ci: CanvasItem, model_id: String, origin: Vector2, height: float = 14.0, cab_col: Color = Color("3B82F6"), good_id: String = "") -> float:
 	var tdef: Dictionary = GameCatalog.TRUCKS.get(model_id, GameCatalog.TRUCKS["hauler"])
@@ -557,27 +538,80 @@ static func draw_mini_truck(ci: CanvasItem, model_id: String, origin: Vector2, h
 	var h: float = height
 	var x: float = origin.x
 	var y: float = origin.y
+	var tile := Color("ECEEEA")
 	var paper := Color("F6F5EF")
+	var hopper := Color("B4B9B3")
 	var ink := Color("1D2128")
+	var is_low := (model_id == "lowloader")
+	var is_exp := (model_id == "express")
+	var is_blk := (model_id == "bulker")
+	var is_frt := (model_id == "freighter")
 
 	for ti in range(trailers.size() - 1, -1, -1):
 		var slots: int = int(trailers[ti])
 		var tw: float = maxf(h * 1.05, float(slots) * (h * 0.62))
-		var r := Rect2(x, y, tw, h)
-		ci.draw_rect(r, paper, true)
-		ci.draw_rect(r, ink, false, 1.4)
+		if is_low:
+			tw = h * 1.12
+		elif is_blk:
+			tw = h * 1.72
+		var r := Rect2(x, y + (h * 0.06 if is_low else 0.0), tw, h * (0.88 if is_low else 1.0))
+		ci.draw_rect(r, paper if is_exp else tile, true)
+		if is_blk:
+			ci.draw_rect(r.grow(-1.6), hopper, true)
+		elif is_low:
+			ci.draw_rect(Rect2(r.position.x, r.position.y, 2.0, r.size.y), ink, true)
+			ci.draw_rect(Rect2(r.end.x - 2.0, r.position.y, 2.0, r.size.y), ink, true)
+		ci.draw_rect(r, ink, false, 1.3)
 		if good_id != "" and GameCatalog.GOODS.has(good_id):
-			var g_slots: int = int(GameCatalog.GOODS[good_id]["slots"])
-			var fit: int = 1 if bool(tdef["any_size_per_trailer"]) else maxi(0, slots / g_slots)
-			for si in range(fit):
-				var gx: float = x + tw * (float(si) + 0.5) / float(maxi(1, fit))
-				draw_shape(ci, good_id, Vector2(gx, y + h * 0.5), h * 0.62)
-		x += tw + 2.0
+			if not (is_blk and not GameCatalog.is_raw_good(good_id)):
+				var g_slots: int = int(GameCatalog.GOODS[good_id]["slots"])
+				var fit: int = 1 if is_low else (slots if is_blk else maxi(0, slots / g_slots))
+				for si in range(fit):
+					var gx: float = x + tw * (float(si) + 0.5) / float(maxi(1, fit))
+					var gy: float = y + h * 0.5 + ([-0.8, 0.9, -0.4][si % 3] if is_blk else 0.0)
+					ShapeGlyphs.draw(ci, good_id, Vector2(gx, gy), h * (0.68 if (g_slots > 1) else 0.56), ShapeGlyphs.truck_angle(good_id), ink, 0.8)
+		ci.draw_line(Vector2(r.end.x, y + h * 0.5), Vector2(r.end.x + 2.2, y + h * 0.5), cab_col if is_exp else ink, 1.6)
+		x += tw + 2.2
 
-	# Tractor cab facing right
-	var cw: float = h * 0.78
-	var cab_r := Rect2(x, y + h * 0.08, cw, h * 0.84)
-	ci.draw_rect(cab_r, cab_col, true)
-	ci.draw_rect(Rect2(x + cw * 0.55, y + h * 0.20, cw * 0.34, h * 0.60), Color("2B3442"), true)
-	ci.draw_rect(cab_r, ink, false, 1.4)
+	# Tractor cab facing right (model-authentic silhouette)
+	var cw: float = h * (1.02 if is_low else 0.82)
+	if is_exp:
+		var poly := PackedVector2Array([
+			Vector2(x, y + h * 0.06),
+			Vector2(x + cw * 0.68, y + h * 0.06),
+			Vector2(x + cw, y + h * 0.30),
+			Vector2(x + cw, y + h * 0.70),
+			Vector2(x + cw * 0.68, y + h * 0.94),
+			Vector2(x, y + h * 0.94)
+		])
+		ci.draw_colored_polygon(poly, cab_col)
+		var closed := poly.duplicate()
+		closed.append(poly[0])
+		ci.draw_polyline(closed, ink, 1.3)
+		ci.draw_polyline(PackedVector2Array([
+			Vector2(x + cw * 0.36, y + h * 0.24),
+			Vector2(x + cw * 0.68, y + h * 0.42),
+			Vector2(x + cw * 0.68, y + h * 0.58),
+			Vector2(x + cw * 0.36, y + h * 0.76)
+		]), paper, 1.3)
+	elif is_low:
+		var cab_r := Rect2(x, y + h * 0.08, cw * 0.56, h * 0.84)
+		var hood_r := Rect2(x + cw * 0.54, y + h * 0.20, cw * 0.44, h * 0.60)
+		ci.draw_rect(cab_r, cab_col, true)
+		ci.draw_rect(hood_r, cab_col, true)
+		ci.draw_rect(Rect2(x + cw * 0.34, y + h * 0.18, cw * 0.18, h * 0.64), Color("2B3442"), true)
+		ci.draw_rect(cab_r, ink, false, 1.3)
+		ci.draw_rect(hood_r, ink, false, 1.2)
+	else:
+		if is_blk:
+			ci.draw_rect(Rect2(x - 1.2, y + h * 0.04, 1.8, h * 0.92), ink, true)
+		var cab_r := Rect2(x, y + h * 0.08, cw, h * 0.84)
+		ci.draw_rect(cab_r, cab_col, true)
+		if is_frt or is_blk:
+			ci.draw_rect(Rect2(x + cw * 0.54, y + h * 0.18, cw * 0.30, h * 0.27), Color("2B3442"), true)
+			ci.draw_rect(Rect2(x + cw * 0.54, y + h * 0.55, cw * 0.30, h * 0.27), Color("2B3442"), true)
+		else:
+			ci.draw_rect(Rect2(x + cw * 0.54, y + h * 0.20, cw * 0.32, h * 0.60), Color("2B3442"), true)
+		ci.draw_rect(cab_r, ink, false, 1.3)
 	return (x + cw) - origin.x
+

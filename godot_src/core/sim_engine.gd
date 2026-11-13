@@ -56,12 +56,15 @@ var revenue_events: Array = []
 var upkeep_events: Array = []
 var flow_edges: Dictionary = {} # "from->to->good" : {fromId, toId, good, times: Array[float]}
 var floating_toasts: Array = []
+var depot: Dictionary = {}
+var cargo_flights: Array = []
 
 var _uid_counter: int = 100
 var _sim_accum: float = 0.0
 var _upkeep_timer: float = 0.0
 var _history_timer: float = 0.0
 var _turn_curve_cache: Dictionary = {}
+var _route_rng := RandomNumberGenerator.new()
 
 func initialize(sfx_node: SfxSynth, initial_map: String = "karisidenan_madiun", load_save: bool = true) -> void:
 	sfx = sfx_node
@@ -94,6 +97,7 @@ func load_map(map_id: String, try_restore: bool = true) -> void:
 
 	map_def = template.duplicate(true)
 	current_map_id = String(map_def["id"])
+	_route_rng.seed = int(current_map_id.hash()) ^ 0x517cc1b7
 	regions = map_def["regions"]
 	junctions = map_def["junctions"]
 	roads = map_def["roads"]
@@ -112,6 +116,7 @@ func load_map(map_id: String, try_restore: bool = true) -> void:
 
 	routes.clear()
 	agents.clear()
+	cargo_flights.clear()
 	unlocked_licenses = {"hauler": true}
 	cash = 3500
 	real_time_sec = 0.0
@@ -215,6 +220,9 @@ func _hydrate_geometry() -> void:
 		f["pos"] = Vector2(float(f["x"]), float(f["y"]))
 		f["color_val"] = Color(String(f.get("color", "#4ea854")))
 		f["roof_val"] = Color(String(f.get("roofColor", "#3a7d40")))
+		if not f.has("upgrades") or typeof(f["upgrades"]) != TYPE_DICTIONARY:
+			f["upgrades"] = {}
+		f["upgrades"]["bays"] = clampi(int(f["upgrades"].get("bays", 0)), 0, 7)
 		if not f.has("inputBuffers") or typeof(f["inputBuffers"]) != TYPE_DICTIONARY:
 			f["inputBuffers"] = {}
 		if not f.has("deliveredWindow") or typeof(f["deliveredWindow"]) != TYPE_DICTIONARY:
@@ -226,12 +234,27 @@ func _hydrate_geometry() -> void:
 		f["stalledReason"] = String(f.get("stalledReason", "none"))
 		f["stalledSec"] = float(f.get("stalledSec", 0.0))
 		f["lastGrowSec"] = float(f.get("lastGrowSec", -1000.0))
+		f["scrappedCount"] = int(f.get("scrappedCount", 0))
 		f["occupiedBays"] = 0
 		var kind_s := String(f["kind"])
 		f["vehiclePresent"] = true
 		f["vehicleTimer"] = 18.0
 		f["vehicleCapacityRemaining"] = (40 + 20 * int(f["upgrades"].get("shipSize", 0))) if kind_s == "harbour" else (20 + 10 * int(f["upgrades"].get("trainLength", 0)))
 		f["boardedSlots"] = 0
+		f["vehicleLoaded"] = 0
+		f["vehicleCargo"] = []
+
+	if map_def.has("depot") and typeof(map_def["depot"]) == TYPE_DICTIONARY and not (map_def["depot"] as Dictionary).is_empty():
+		depot = (map_def["depot"] as Dictionary).duplicate(true)
+		depot["pos"] = Vector2(float(depot.get("x", 0.0)), float(depot.get("y", 0.0)))
+		depot["angle"] = float(depot.get("angle", 0.0))
+		depot["junctionId"] = String(depot.get("junctionId", ""))
+		depot["name"] = String(depot.get("name", "Depo Armada"))
+	else:
+		var fallback_pos: Vector2 = regions[0]["center_vec"] + Vector2(-28.0, 22.0) if not regions.is_empty() else Vector2(80.0, 80.0)
+		var fallback_jid: String = String(junctions[0]["id"]) if not junctions.is_empty() else ""
+		depot = {"name": "Depo Armada", "pos": fallback_pos, "x": fallback_pos.x, "y": fallback_pos.y, "angle": 0.0, "junctionId": fallback_jid}
+
 
 func _make_default_light(j: Dictionary = {}) -> Dictionary:
 	var lt := {
@@ -603,6 +626,128 @@ func buy_facility_upgrade(fac_id: String, track: String) -> bool:
 			return true
 	return false
 
+# === STORAGE PADS & CARGO FLIGHTS ===
+
+func get_facility_storage_pads(f: Dictionary) -> Array[Dictionary]:
+	var out: Array[Dictionary] = []
+	var kind_s := String(f.get("kind", ""))
+	var fpos: Vector2 = f.get("pos", Vector2.ZERO)
+	var up: Dictionary = f.get("upgrades", {})
+	var buf_lv: int = clampi(int(up.get("buffer", 0)), 0, 4)
+	var grow_w: float = float(buf_lv) * 0.65
+	var grow_h: float = float(buf_lv) * 0.55
+
+	if kind_s == "supplier" and f.get("outputGood", null) != null:
+		var og := String(f["outputGood"])
+		out.append({
+			"role": "output",
+			"good": og,
+			"pos": fpos + Vector2(15.2 + grow_w * 0.5, 1.5),
+			"size": Vector2(11.4 + grow_w, 8.6 + grow_h),
+			"buffer_lv": buf_lv,
+			"count": int(f.get("outputBuffer", 0)),
+			"items": []
+		})
+	elif kind_s == "factory" and f.get("outputGood", null) != null:
+		var og := String(f["outputGood"])
+		if GameCatalog.GOODS.has(og):
+			var inputs: Array = GameCatalog.GOODS[og]["inputs"]
+			var n_in: int = inputs.size()
+			var in_bufs: Dictionary = f.get("inputBuffers", {})
+			for i in range(n_in):
+				var ig := String(inputs[i]["good"])
+				var y_off: float = (float(i) - float(n_in - 1) * 0.5) * (8.8 + grow_h * 0.5) + 1.0
+				out.append({
+					"role": "input",
+					"good": ig,
+					"pos": fpos + Vector2(-15.2 - grow_w * 0.5, y_off),
+					"size": Vector2(10.6 + grow_w, 7.8 + grow_h * 0.7),
+					"buffer_lv": buf_lv,
+					"count": int(in_bufs.get(ig, 0)),
+					"items": []
+				})
+		out.append({
+			"role": "output",
+			"good": og,
+			"pos": fpos + Vector2(15.2 + grow_w * 0.5, 1.5),
+			"size": Vector2(11.4 + grow_w, 8.6 + grow_h),
+			"buffer_lv": buf_lv,
+			"count": int(f.get("outputBuffer", 0)),
+			"items": []
+		})
+	elif kind_s == "station" or kind_s == "harbour":
+		var hub_lv: int = clampi(int(up.get("shipSize" if kind_s == "harbour" else "trainLength", 0)), 0, 3)
+		var off: Vector2 = Vector2(-16.5, 2.5) if kind_s == "station" else Vector2(-18.5, 3.0)
+		var pile: Array = f.get("yardPile", [])
+		out.append({
+			"role": "yard",
+			"good": "",
+			"pos": fpos + off,
+			"size": Vector2(13.2 + float(hub_lv) * 1.1, 9.6 + float(hub_lv) * 0.8),
+			"buffer_lv": mini(4, hub_lv + 1),
+			"count": pile.size(),
+			"items": pile
+		})
+	return out
+
+func get_facility_pad_world_pos(f: Dictionary, role: String, good_id: String = "") -> Vector2:
+	for pad in get_facility_storage_pads(f):
+		if String(pad["role"]) == role and (good_id == "" or String(pad["good"]) == "" or String(pad["good"]) == good_id):
+			return pad["pos"]
+	return f.get("pos", Vector2.ZERO)
+
+func get_facility_vehicle_world_pos(f: Dictionary) -> Vector2:
+	var kind_s := String(f.get("kind", ""))
+	var fpos: Vector2 = f.get("pos", Vector2.ZERO)
+	if kind_s == "station":
+		return fpos + Vector2(0.0, 16.2)
+	if kind_s == "harbour":
+		return fpos + Vector2(2.0, 18.5)
+	return fpos
+
+func launch_cargo_hop(good_id: String, from_pos: Vector2, to_pos: Vector2) -> void:
+	if good_id == "" or not GameCatalog.GOODS.has(good_id):
+		return
+	if cargo_flights.size() >= 72:
+		cargo_flights.pop_front()
+	var dist: float = from_pos.distance_to(to_pos)
+	var dur: float = clampf(0.38 + dist / 216.0, 0.38, 0.95)
+	cargo_flights.append({
+		"kind": "hop",
+		"good": good_id,
+		"from": from_pos,
+		"to": to_pos,
+		"t": 0.0,
+		"dur": dur,
+		"ring": -1.0
+	})
+
+func launch_cargo_crumble(good_id: String, pos: Vector2) -> void:
+	if good_id == "" or not GameCatalog.GOODS.has(good_id):
+		return
+	if cargo_flights.size() >= 72:
+		cargo_flights.pop_front()
+	cargo_flights.append({
+		"kind": "crumble",
+		"good": good_id,
+		"pos": pos,
+		"rot": _route_rng.randf_range(-0.45, 0.45),
+		"t": 0.0,
+		"dur": 0.55,
+		"seed": int(_route_rng.randi() & 0x7fffffff)
+	})
+
+static func _make_initial_unit_poses(model_id: String, origin_pos: Vector2, heading: float = 0.0) -> Array:
+	var units: Array[Dictionary] = GameCatalog.get_truck_units(model_id)
+	var cab_mid: float = (float(units[0]["front"]) + float(units[0]["rear"])) * 0.5
+	var dir := Vector2(cos(heading), sin(heading))
+	var poses: Array = []
+	for u in units:
+		var u_mid: float = (float(u["front"]) + float(u["rear"])) * 0.5
+		var back_px: float = (u_mid - cab_mid) * GameCatalog.TRUCK_VIEW_SCALE
+		poses.append({"pos": origin_pos - dir * back_px, "heading": heading})
+	return poses
+
 # === ROUTES & FLEET ===
 
 func create_route(from_fac_id: String, to_fac_id: String, good_filter: String = "any", buy_first_truck: bool = true) -> Dictionary:
@@ -620,7 +765,11 @@ func create_route(from_fac_id: String, to_fac_id: String, good_filter: String = 
 		if acc.is_empty() or acc.has(out_g):
 			resolved_good = out_g
 
-	var col: Color = GameCatalog.ROUTE_PALETTE[routes.size() % GameCatalog.ROUTE_PALETTE.size()]
+	var taken_colors: Array = []
+	for existing_rt in routes:
+		taken_colors.append(existing_rt["color"])
+	var color_seed_good: String = resolved_good if resolved_good != "any" else (String(f_from["outputGood"]) if f_from.get("outputGood", null) != null else "")
+	var col: Color = GameCatalog.pick_route_color(_route_rng, taken_colors, color_seed_good)
 	var from_short: String = String(f_from["name"]).split(" ")[0]
 	var to_short: String = String(f_to["name"]).split(" ")[0]
 	var rt := {
@@ -631,12 +780,18 @@ func create_route(from_fac_id: String, to_fac_id: String, good_filter: String = 
 		"toFacilityId": to_fac_id,
 		"goodFilter": resolved_good,
 		"waypoints": [],
+		"waypointsBack": [],
 		"sameWayBack": true,
 		"truckModel": "hauler",
 		"forwardPath": [],
 		"returnPath": [],
 		"clearTimeForwardSec": 8.0,
 		"brokenReason": "",
+		"brokenKind": "",
+		"brokenTag": "",
+		"brokenEdgeId": "",
+		"brokenJunctionId": "",
+		"brokenPos": Vector2.INF,
 		"activeTruckIds": [],
 		"totalRevenue": 0,
 		"deliveriesCount": 0,
@@ -662,7 +817,7 @@ func delete_route(route_id: String) -> void:
 				sfx.play_ui("remove")
 			return
 
-func toggle_route_waypoint(route_id: String, junction_id: String) -> void:
+func toggle_route_waypoint(route_id: String, junction_id: String, is_return_leg: bool = false) -> void:
 	var rt: Dictionary = get_route(route_id)
 	if rt.is_empty():
 		return
@@ -670,7 +825,10 @@ func toggle_route_waypoint(route_id: String, junction_id: String) -> void:
 	var f_to: Dictionary = facility_map[String(rt["toFacilityId"])]
 	if junction_id == String(f_from["junctionId"]) or junction_id == String(f_to["junctionId"]):
 		return
-	var wps: Array = rt["waypoints"]
+	var use_back: bool = is_return_leg and not bool(rt.get("sameWayBack", true))
+	if not rt.has("waypointsBack") or typeof(rt["waypointsBack"]) != TYPE_ARRAY:
+		rt["waypointsBack"] = []
+	var wps: Array = rt["waypointsBack"] if use_back else rt["waypoints"]
 	var idx: int = wps.find(junction_id)
 	if idx >= 0:
 		wps.remove_at(idx)
@@ -686,16 +844,28 @@ func set_route_same_way_back(route_id: String, enabled: bool) -> void:
 	var rt: Dictionary = get_route(route_id)
 	if rt.is_empty():
 		return
+	var prev_swb: bool = bool(rt.get("sameWayBack", true))
 	rt["sameWayBack"] = enabled
+	if not enabled and prev_swb:
+		if not rt.has("waypointsBack") or (rt["waypointsBack"] as Array).is_empty():
+			var rev: Array = (rt.get("waypoints", []) as Array).duplicate()
+			rev.reverse()
+			rt["waypointsBack"] = rev
 	recompute_single_route(rt)
 	if sfx:
 		sfx.play_ui("tick")
 
-func clear_route_waypoints(route_id: String) -> void:
+func clear_route_waypoints(route_id: String, is_return_leg: bool = false) -> void:
 	var rt: Dictionary = get_route(route_id)
 	if rt.is_empty():
 		return
-	(rt["waypoints"] as Array).clear()
+	if is_return_leg and not bool(rt.get("sameWayBack", true)):
+		if rt.has("waypointsBack"):
+			(rt["waypointsBack"] as Array).clear()
+	else:
+		(rt["waypoints"] as Array).clear()
+		if bool(rt.get("sameWayBack", true)) and rt.has("waypointsBack"):
+			(rt["waypointsBack"] as Array).clear()
 	recompute_single_route(rt)
 	if sfx:
 		sfx.play_ui("remove")
@@ -711,6 +881,8 @@ func recompute_single_route(rt: Dictionary) -> void:
 	var f_to: Dictionary = facility_map.get(String(rt["toFacilityId"]), {})
 	if f_from.is_empty() or f_to.is_empty():
 		return
+	if not rt.has("waypointsBack") or typeof(rt["waypointsBack"]) != TYPE_ARRAY:
+		rt["waypointsBack"] = []
 	var wps_fwd: Array = rt.get("waypoints", [])
 	var fwd: Dictionary = RoutePathfinder.find_directed_path(
 		String(f_from["junctionId"]),
@@ -721,10 +893,15 @@ func recompute_single_route(rt: Dictionary) -> void:
 		unlocked_regions,
 		String(rt["truckModel"])
 	)
+	var swb: bool = bool(rt.get("sameWayBack", true))
 	var ret_wps: Array = []
-	if bool(rt.get("sameWayBack", true)) and not wps_fwd.is_empty():
-		ret_wps = wps_fwd.duplicate()
-		ret_wps.reverse()
+	if swb:
+		if not wps_fwd.is_empty():
+			ret_wps = wps_fwd.duplicate()
+			ret_wps.reverse()
+	else:
+		ret_wps = rt.get("waypointsBack", [])
+
 	var ret: Dictionary = RoutePathfinder.find_directed_path(
 		String(f_to["junctionId"]),
 		String(f_from["junctionId"]),
@@ -734,8 +911,8 @@ func recompute_single_route(rt: Dictionary) -> void:
 		unlocked_regions,
 		String(rt["truckModel"])
 	)
-	# Graceful fallback to direct return if reversed waypoints hit a one-way street
-	if String(ret["broken_reason"]) != "" and not ret_wps.is_empty():
+	# Graceful fallback to direct return ONLY when sameWayBack auto-reversed waypoints hit a one-way street
+	if swb and String(ret["broken_reason"]) != "" and not ret_wps.is_empty():
 		var ret_direct: Dictionary = RoutePathfinder.find_directed_path(
 			String(f_to["junctionId"]),
 			String(f_from["junctionId"]),
@@ -750,11 +927,14 @@ func recompute_single_route(rt: Dictionary) -> void:
 
 	rt["forwardPath"] = fwd["steps"]
 	rt["returnPath"] = ret["steps"]
-	rt["clearTimeForwardSec"] = maxf(3.5, float(fwd["clear_time_sec"]))
-	var br := String(fwd["broken_reason"])
-	if br == "":
-		br = String(ret["broken_reason"])
-	rt["brokenReason"] = br
+	rt["clearTimeForwardSec"] = maxf(3.0, float(fwd["clear_time_sec"]))
+	var fault_src: Dictionary = fwd if String(fwd["broken_reason"]) != "" else ret
+	rt["brokenReason"] = String(fault_src.get("broken_reason", ""))
+	rt["brokenKind"] = String(fault_src.get("broken_kind", ""))
+	rt["brokenTag"] = String(fault_src.get("broken_tag", ""))
+	rt["brokenEdgeId"] = String(fault_src.get("broken_edge_id", ""))
+	rt["brokenJunctionId"] = String(fault_src.get("broken_junction_id", ""))
+	rt["brokenPos"] = fault_src.get("broken_pos", Vector2.INF)
 
 func recompute_all_routes() -> void:
 	for rt in routes:
@@ -792,9 +972,8 @@ func add_truck_to_route(route_id: String, free_starter: bool = false) -> bool:
 
 	var f_from: Dictionary = facility_map[String(rt["fromFacilityId"])]
 	var fpos: Vector2 = f_from["pos"]
-	var tr_poses: Array = []
-	for _k in tdef["trailers"]:
-		tr_poses.append({"pos": fpos, "heading": 0.0})
+	var unit_poses: Array = _make_initial_unit_poses(model_id, fpos, 0.0)
+	var tr_poses: Array = unit_poses.slice(1)
 
 	var ag := {
 		"id": _next_uid("trk"),
@@ -823,7 +1002,10 @@ func add_truck_to_route(route_id: String, free_starter: bool = false) -> bool:
 		"gridlockSec": 0.0,
 		"pos": fpos,
 		"heading": 0.0,
-		"trailerPoses": tr_poses
+		"unitPoses": unit_poses,
+		"trailerPoses": tr_poses,
+		"depotPath": [],
+		"blockerAgentId": ""
 	}
 	agents.append(ag)
 	(rt["activeTruckIds"] as Array).append(ag["id"])
@@ -910,18 +1092,313 @@ func apply_route_model_swap(route_id: String, target_model: String) -> bool:
 	cash -= net
 	unlocked_licenses[target_model] = true
 	rt["truckModel"] = target_model
-	var new_def: Dictionary = GameCatalog.TRUCKS[target_model]
 	for ag in agents:
 		if String(ag["routeId"]) == route_id:
 			ag["model"] = target_model
-			var tp: Array = []
-			for _k in new_def["trailers"]:
-				tp.append({"pos": ag["pos"], "heading": ag["heading"]})
-			ag["trailerPoses"] = tp
+			var uposes: Array = _make_initial_unit_poses(target_model, ag["pos"], float(ag["heading"]))
+			ag["unitPoses"] = uposes
+			ag["trailerPoses"] = uposes.slice(1)
 	recompute_single_route(rt)
 	if sfx:
 		sfx.play_ui("purchase")
 	return true
+
+# === TRUCK INSPECTOR & FLEET INTERVENTION (`truck_inspector.gd`) ===
+
+func get_agent(agent_id: String) -> Dictionary:
+	for ag in agents:
+		if String(ag["id"]) == agent_id:
+			return ag
+	return {}
+
+func get_agent_resale_value(ag: Dictionary) -> int:
+	if ag.is_empty():
+		return 0
+	var model_id := String(ag.get("model", "hauler"))
+	return GameCatalog.compute_truck_resale_price(model_id, get_owned_count_by_model(model_id), agents.size())
+
+func sell_agent(agent_id: String) -> int:
+	var ag: Dictionary = get_agent(agent_id)
+	if ag.is_empty():
+		return 0
+	var refund: int = get_agent_resale_value(ag)
+	if remove_truck_from_route(String(ag["routeId"]), agent_id):
+		return refund
+	return 0
+
+func hit_test_agent(world_pos: Vector2, max_dist: float = 10.5, include_parked: bool = false) -> Dictionary:
+	var best: Dictionary = {}
+	var best_d: float = max_dist
+	for ag in agents:
+		var st := String(ag["state"])
+		if not include_parked and (st == "loading" or st == "unloading"):
+			continue
+		var uposes: Array = ag.get("unitPoses", [])
+		if uposes.is_empty():
+			var d0: float = (ag["pos"] as Vector2).distance_to(world_pos)
+			if d0 < best_d:
+				best_d = d0
+				best = ag
+		else:
+			for up in uposes:
+				var du: float = (up["pos"] as Vector2).distance_to(world_pos)
+				if du < best_d:
+					best_d = du
+					best = ag
+	return best
+
+func leave_bay_early(agent_id: String) -> bool:
+	var ag: Dictionary = get_agent(agent_id)
+	if ag.is_empty():
+		return false
+	var rt: Dictionary = get_route(String(ag["routeId"]))
+	if rt.is_empty() or String(rt.get("brokenReason", "")) != "":
+		return false
+	var st := String(ag["state"])
+	if st == "loading":
+		ag["dwellSec"] = 0.0
+		ag["waitSec"] = 0.0
+		ag["waitReason"] = "none"
+		ag["departedSec"] = real_time_sec
+		ag["state"] = "driving_outbound"
+		ag["stepIndex"] = 0
+		ag["sPx"] = 0.0
+		ag["lastIssue"] = "Diminta berangkat dari dermaga muat"
+		if sfx:
+			sfx.play_ui("tick")
+		return true
+	if st == "queuing_bay" or st == "unloading":
+		var c_good := String(ag.get("cargoGood", ""))
+		var c_qty: int = int(ag.get("cargoQty", 0))
+		if c_good != "" and c_qty > 0 and GameCatalog.GOODS.has(c_good):
+			var f_to: Dictionary = facility_map.get(String(rt["toFacilityId"]), {})
+			var scrap_pay: int = maxi(1, int(round(float(int(GameCatalog.GOODS[c_good]["value"]) * c_qty) * 0.10)))
+			cash += scrap_pay
+			revenue_events.append({"t": real_time_sec, "amount": scrap_pay})
+			if not f_to.is_empty():
+				f_to["scrappedCount"] = int(f_to.get("scrappedCount", 0)) + c_qty
+				launch_cargo_crumble(c_good, f_to["pos"])
+				spawn_toast(f_to["pos"] + Vector2(0, -14), "Scrap +" + GameCatalog.fmt_cash(scrap_pay), Color("#868e96"))
+		ag["cargoGood"] = ""
+		ag["cargoQty"] = 0
+		ag["expressBonusLocked"] = -1.0
+		ag["state"] = "driving_return"
+		ag["stepIndex"] = 0
+		ag["sPx"] = 0.0
+		ag["waitSec"] = 0.0
+		ag["waitReason"] = "none"
+		if sfx:
+			sfx.play_ui("tick")
+		return true
+	return false
+
+func send_agent_to_depot(agent_id: String) -> bool:
+	var ag: Dictionary = get_agent(agent_id)
+	if ag.is_empty() or depot.is_empty():
+		return false
+	var c_good := String(ag.get("cargoGood", ""))
+	if c_good != "" and int(ag.get("cargoQty", 0)) > 0:
+		launch_cargo_crumble(c_good, ag["pos"])
+	ag["cargoGood"] = ""
+	ag["cargoQty"] = 0
+	ag["expressBonusLocked"] = -1.0
+	ag["waitSec"] = 0.0
+	ag["waitReason"] = "none"
+	ag["blockerAgentId"] = ""
+
+	var start_jid: String = ""
+	var sd: Dictionary = _get_agent_current_step(ag)
+	if not sd.is_empty():
+		start_jid = String(sd.get("toJunctionId", ""))
+	else:
+		var rt: Dictionary = get_route(String(ag["routeId"]))
+		if not rt.is_empty():
+			var fid: String = String(rt["toFacilityId"]) if (String(ag["state"]) == "unloading" or String(ag["state"]) == "queuing_bay") else String(rt["fromFacilityId"])
+			if facility_map.has(fid):
+				start_jid = String(facility_map[fid]["junctionId"])
+
+	var depot_jid := String(depot.get("junctionId", ""))
+	if start_jid != "" and depot_jid != "" and start_jid != depot_jid and junction_map.has(start_jid) and junction_map.has(depot_jid):
+		var dp: Dictionary = RoutePathfinder.find_directed_path(start_jid, depot_jid, [], junction_map, road_map, unlocked_regions, String(ag["model"]))
+		var steps: Array = dp.get("steps", [])
+		if not steps.is_empty() and String(dp.get("broken_reason", "")) == "":
+			ag["depotPath"] = steps
+			ag["state"] = "driving_to_depot"
+			ag["stepIndex"] = 0
+			ag["sPx"] = 0.0
+			if sfx:
+				sfx.play_ui("tick")
+			return true
+
+	ag["depotPath"] = []
+	ag["state"] = "at_depot"
+	ag["dwellSec"] = 1.4
+	ag["speedPx"] = 0.0
+	ag["pos"] = depot.get("pos", ag["pos"])
+	var d_ang: float = float(depot.get("angle", 0.0))
+	ag["heading"] = d_ang
+	var uposes: Array = _make_initial_unit_poses(String(ag["model"]), ag["pos"], d_ang)
+	ag["unitPoses"] = uposes
+	ag["trailerPoses"] = uposes.slice(1)
+	if sfx:
+		sfx.play_ui("tick")
+	return true
+
+func get_agent_blocking_chain(ag: Dictionary) -> Dictionary:
+	var links: Array[Dictionary] = []
+	var visited: Dictionary = {String(ag.get("id", "")): true}
+	var cur: Dictionary = ag
+	var is_gridlock: bool = false
+	var root_cause_pos: Vector2 = ag.get("pos", Vector2.ZERO)
+	var root_reason: String = String(ag.get("waitReason", "none"))
+	for _depth in range(8):
+		var bid := String(cur.get("blockerAgentId", ""))
+		if bid == "":
+			break
+		var blk: Dictionary = get_agent(bid)
+		if blk.is_empty():
+			break
+		links.append({
+			"fromId": String(cur["id"]),
+			"toId": bid,
+			"fromPos": cur["pos"],
+			"toPos": blk["pos"],
+			"reason": String(blk.get("waitReason", "none"))
+		})
+		root_cause_pos = blk["pos"]
+		root_reason = String(blk.get("waitReason", "none"))
+		if visited.has(bid):
+			is_gridlock = true
+			break
+		visited[bid] = true
+		cur = blk
+	return {
+		"links": links,
+		"isGridlock": is_gridlock,
+		"rootPos": root_cause_pos,
+		"rootReason": root_reason
+	}
+
+func diagnose_agent(ag: Dictionary) -> Dictionary:
+	if ag.is_empty():
+		return {}
+	var rt: Dictionary = get_route(String(ag.get("routeId", "")))
+	var st := String(ag.get("state", "loading"))
+	var wr := String(ag.get("waitReason", "none"))
+	var ws: float = float(ag.get("waitSec", 0.0))
+	var chain_info: Dictionary = get_agent_blocking_chain(ag)
+	var status_label := "Mengemudi"
+	var wait_label := ""
+	var cause_pos: Vector2 = ag.get("pos", Vector2.ZERO)
+	var has_cause: bool = false
+
+	match st:
+		"loading":
+			status_label = "Di dermaga muat asal"
+			if wr == "broken_route":
+				wait_label = "Rute terputus: %s" % String(rt.get("brokenReason", ""))
+				var bp: Vector2 = rt.get("brokenPos", Vector2.INF)
+				if bp.is_finite():
+					cause_pos = bp
+					has_cause = true
+			elif wr == "cargo_wait":
+				wait_label = "Menunggu produksi muatan (%.0f / %.0f dtk)" % [ws, MAX_LOAD_WAIT_SEC]
+				cause_pos = ag["pos"]
+				has_cause = true
+			else:
+				wait_label = "Memuat kargo ke trailer..."
+		"queuing_bay":
+			status_label = "Antre masuk dermaga tujuan"
+			wait_label = "Semua dermaga bongkar penuh (%.0f dtk)" % ws
+			if not rt.is_empty() and facility_map.has(String(rt["toFacilityId"])):
+				cause_pos = facility_map[String(rt["toFacilityId"])]["pos"]
+				has_cause = true
+		"unloading":
+			status_label = "Membongkar muatan"
+			if wr == "scrap_wait":
+				wait_label = "Gudang tujuan penuh! Scrap dalam %.1f dtk" % maxf(0.0, SCRAP_WAIT_SEC - ws)
+				cause_pos = ag["pos"]
+				has_cause = true
+			else:
+				wait_label = "Bongkar kargo ke gudang..."
+		"driving_outbound":
+			status_label = "Mengantar kargo ke tujuan"
+		"driving_return":
+			status_label = "Kembali ke fasilitas asal"
+		"driving_to_depot":
+			status_label = "Menuju Depo Armada"
+		"driving_from_depot":
+			status_label = "Kembali ke rute dari Depo"
+		"at_depot":
+			status_label = "Siaga di Depo Armada"
+
+	if st in ["driving_outbound", "driving_return", "driving_to_depot", "driving_from_depot"]:
+		if bool(chain_info["isGridlock"]):
+			wait_label = "GRIDLOCK — rantai antrean melingkar!"
+			cause_pos = chain_info["rootPos"]
+			has_cause = true
+		elif wr == "red_light":
+			wait_label = "Berhenti di lampu merah"
+			var sd: Dictionary = _get_agent_current_step(ag)
+			if not sd.is_empty() and junction_map.has(String(sd["toJunctionId"])):
+				cause_pos = junction_map[String(sd["toJunctionId"])]["pos"]
+				has_cause = true
+		elif wr == "yield":
+			wait_label = "Memberi jalan (Yield) pada arus utama"
+			var sd2: Dictionary = _get_agent_current_step(ag)
+			if not sd2.is_empty() and junction_map.has(String(sd2["toJunctionId"])):
+				cause_pos = junction_map[String(sd2["toJunctionId"])]["pos"]
+				has_cause = true
+		elif wr == "roundabout":
+			wait_label = "Menunggu celah masuk bundaran"
+			var sd3: Dictionary = _get_agent_current_step(ag)
+			if not sd3.is_empty() and junction_map.has(String(sd3["toJunctionId"])):
+				cause_pos = junction_map[String(sd3["toJunctionId"])]["pos"]
+				has_cause = true
+		elif wr == "following":
+			var links: Array = chain_info["links"]
+			wait_label = "Mengikuti %d truk di depan (%s)" % [maxi(1, links.size()), String(chain_info["rootReason"])]
+			cause_pos = chain_info["rootPos"]
+			has_cause = true
+
+	return {
+		"status": status_label,
+		"waiting": wait_label,
+		"hasCause": has_cause,
+		"causePos": cause_pos,
+		"chain": chain_info["links"],
+		"isGridlock": bool(chain_info["isGridlock"])
+	}
+
+func get_agent_remaining_polyline(ag: Dictionary) -> PackedVector2Array:
+	var out := PackedVector2Array()
+	if ag.is_empty():
+		return out
+	var st := String(ag.get("state", ""))
+	if st not in ["driving_outbound", "driving_return", "driving_to_depot", "driving_from_depot"]:
+		return out
+	var rt: Dictionary = get_route(String(ag.get("routeId", "")))
+	var path: Array = _get_agent_active_path(ag, rt)
+	var s_idx: int = int(ag.get("stepIndex", 0))
+	if s_idx < 0 or s_idx >= path.size():
+		return out
+	out.append(ag["pos"])
+	for idx in range(s_idx, path.size()):
+		var eid := String(path[idx]["edgeId"])
+		if not road_map.has(eid):
+			continue
+		var traj: Dictionary = _get_step_trajectory(path, idx, int(ag.get("laneIndex", 0)) if idx == s_idx else 0)
+		var pts: PackedVector2Array = traj["pts"]
+		var cum: PackedFloat32Array = traj["cum_len"]
+		var tot_l: float = float(traj["total_len"])
+		var s0: float = clampf(float(ag.get("sPx", 0.0)), 0.0, tot_l) if idx == s_idx else 0.0
+		var sl: PackedVector2Array = RoadGeom.slice_polyline(pts, cum, s0, tot_l)
+		for p in sl:
+			if out.is_empty() or out[out.size() - 1].distance_to(p) > 0.3:
+				out.append(p)
+	return out
+
+
 
 # === TRAFFIC ENGINEERING RULES ===
 
@@ -1507,7 +1984,33 @@ func _step_fixed(dt: float) -> void:
 	_step_facilities(dt)
 	_step_traffic_lights(dt)
 	_step_agents(dt)
+	_step_cargo_flights(dt)
 	_step_upkeep_and_goals(dt)
+
+func _step_cargo_flights(dt: float) -> void:
+	for i in range(cargo_flights.size() - 1, -1, -1):
+		var fl: Dictionary = cargo_flights[i]
+		var fk := String(fl.get("kind", "hop"))
+		if fk == "hop":
+			var ring: float = float(fl.get("ring", -1.0))
+			if ring < 0.0:
+				var nt: float = float(fl["t"]) + dt
+				var dur: float = maxf(0.15, float(fl["dur"]))
+				if nt >= dur:
+					fl["t"] = dur
+					fl["ring"] = 0.0
+				else:
+					fl["t"] = nt
+			else:
+				ring += dt
+				fl["ring"] = ring
+				if ring >= 0.35:
+					cargo_flights.remove_at(i)
+		else:
+			var ct: float = float(fl["t"]) + dt
+			fl["t"] = ct
+			if ct >= maxf(0.2, float(fl.get("dur", 0.55))):
+				cargo_flights.remove_at(i)
 
 func _step_facilities(dt: float) -> void:
 	for f in facilities:
@@ -1559,15 +2062,20 @@ func _step_facilities(dt: float) -> void:
 					var ig := String(inp["good"])
 					in_bufs[ig] = maxi(0, int(in_bufs.get(ig, 0)) - int(inp["qty"]))
 				f["outputBuffer"] = int(f["outputBuffer"]) + 1
+				launch_cargo_hop(out_g, f["pos"], get_facility_pad_world_pos(f, "output", out_g))
 
 		elif k == "station" or k == "harbour":
 			var tt_lvl: int = clampi(int(f["upgrades"].get("timetable", 0)), 0, 3)
 			var wait_factor: float = GameCatalog.TIMETABLE_WAIT_FACTORS[tt_lvl]
 			var v_cap: int = get_hub_vehicle_capacity_slots(f)
 			var pile: Array = f["yardPile"]
+			if not f.has("vehicleCargo") or typeof(f["vehicleCargo"]) != TYPE_ARRAY:
+				f["vehicleCargo"] = []
+			var v_cargo: Array = f["vehicleCargo"]
 
 			# While train/ship is docked, load cargo continuously from on-site yardPile onto vehicle!
 			if bool(f["vehiclePresent"]) and not pile.is_empty() and int(f["vehicleCapacityRemaining"]) > 0:
+				var hopped_this_step: int = 0
 				while not pile.is_empty():
 					var first_g := String(pile[0])
 					var g_slots: int = int(GameCatalog.GOODS.get(first_g, {"slots": 1})["slots"])
@@ -1575,7 +2083,14 @@ func _step_facilities(dt: float) -> void:
 						break
 					pile.pop_front()
 					f["vehicleCapacityRemaining"] = int(f["vehicleCapacityRemaining"]) - g_slots
-					f["boardedSlots"] = int(f.get("boardedSlots", 0)) + g_slots
+					var new_boarded: int = int(f.get("boardedSlots", 0)) + g_slots
+					f["boardedSlots"] = new_boarded
+					f["vehicleLoaded"] = new_boarded
+					if v_cargo.size() < 48:
+						v_cargo.append(first_g)
+					if hopped_this_step < 2:
+						launch_cargo_hop(first_g, get_facility_pad_world_pos(f, "yard"), get_facility_vehicle_world_pos(f))
+						hopped_this_step += 1
 
 			f["vehicleTimer"] = float(f["vehicleTimer"]) - dt
 			# Depart early once full, or when dwell timer expires
@@ -1591,14 +2106,21 @@ func _step_facilities(dt: float) -> void:
 						f["vehicleTimer"] = 18.0 if k == "station" else 22.0
 						f["vehicleCapacityRemaining"] = v_cap
 						f["boardedSlots"] = 0
+						f["vehicleLoaded"] = 0
+						v_cargo.clear()
 					else:
 						f["vehiclePresent"] = false
 						f["vehicleTimer"] = away_sec
+						f["boardedSlots"] = 0
+						f["vehicleLoaded"] = 0
+						v_cargo.clear()
 				else:
 					f["vehiclePresent"] = true
 					f["vehicleTimer"] = 18.0 if k == "station" else 22.0
 					f["vehicleCapacityRemaining"] = v_cap
 					f["boardedSlots"] = 0
+					f["vehicleLoaded"] = 0
+					v_cargo.clear()
 
 func get_edge_phase_at_junction(j: Dictionary, edge_id: String) -> int:
 	if j.has("light") and typeof(j["light"]) == TYPE_DICTIONARY and (j["light"] as Dictionary).has("phases"):
@@ -1703,6 +2225,16 @@ func get_agent_express_bonus_left(ag: Dictionary) -> float:
 		return -1.0
 	return clampf((dl - real_time_sec) / win, 0.0, 1.0)
 
+func _get_agent_active_path(ag: Dictionary, rt: Dictionary) -> Array:
+	var st := String(ag.get("state", ""))
+	if st == "driving_outbound":
+		return rt.get("forwardPath", [])
+	if st == "driving_return":
+		return rt.get("returnPath", [])
+	if st == "driving_to_depot" or st == "driving_from_depot":
+		return ag.get("depotPath", [])
+	return []
+
 func _step_agents(dt: float) -> void:
 	for f in facilities:
 		f["occupiedBays"] = 0
@@ -1716,7 +2248,7 @@ func _step_agents(dt: float) -> void:
 				var fid: String = String(rt_b["fromFacilityId"]) if st == "loading" else String(rt_b["toFacilityId"])
 				if facility_map.has(fid):
 					facility_map[fid]["occupiedBays"] = int(facility_map[fid]["occupiedBays"]) + 1
-		elif st == "driving_outbound" or st == "driving_return":
+		elif st == "driving_outbound" or st == "driving_return" or st == "driving_to_depot" or st == "driving_from_depot":
 			var step_d: Dictionary = _get_agent_current_step(ag)
 			if not step_d.is_empty():
 				var key := "%s:%d" % [String(step_d["edgeId"]), 1 if bool(step_d["forward"]) else 0]
@@ -1745,10 +2277,12 @@ func _step_agents(dt: float) -> void:
 		if st == "loading":
 			ag["braking"] = false
 			ag["turnSignal"] = 0
+			ag["blockerAgentId"] = ""
 			_update_loading_agent(ag, rt, dt)
 		elif st == "queuing_bay":
 			ag["braking"] = true
 			ag["turnSignal"] = 0
+			ag["blockerAgentId"] = ""
 			var f_to: Dictionary = facility_map[String(rt["toFacilityId"])]
 			# Lock Express on-time bonus as soon as truck reaches destination entrance!
 			if String(ag["model"]) == "express" and float(ag.get("expressBonusLocked", -1.0)) < 0.0:
@@ -1769,8 +2303,31 @@ func _step_agents(dt: float) -> void:
 		elif st == "unloading":
 			ag["braking"] = false
 			ag["turnSignal"] = 0
+			ag["blockerAgentId"] = ""
 			_update_unloading_agent(ag, rt, dt)
-		elif st == "driving_outbound" or st == "driving_return":
+		elif st == "at_depot":
+			ag["braking"] = false
+			ag["turnSignal"] = 0
+			ag["blockerAgentId"] = ""
+			ag["speedPx"] = 0.0
+			ag["dwellSec"] = float(ag.get("dwellSec", 0.0)) - dt
+			if float(ag["dwellSec"]) <= 0.0 and String(rt.get("brokenReason", "")) == "":
+				var f_orig: Dictionary = facility_map.get(String(rt["fromFacilityId"]), {})
+				var d_jid := String(depot.get("junctionId", ""))
+				var orig_jid := String(f_orig.get("junctionId", ""))
+				if d_jid != "" and orig_jid != "" and d_jid != orig_jid:
+					var dp_back: Dictionary = RoutePathfinder.find_directed_path(d_jid, orig_jid, [], junction_map, road_map, unlocked_regions, String(ag["model"]))
+					var steps_b: Array = dp_back.get("steps", [])
+					if not steps_b.is_empty() and String(dp_back.get("broken_reason", "")) == "":
+						ag["depotPath"] = steps_b
+						ag["state"] = "driving_from_depot"
+						ag["stepIndex"] = 0
+						ag["sPx"] = 0.0
+						continue
+				ag["state"] = "loading"
+				ag["dwellSec"] = 0.45
+				ag["pos"] = f_orig.get("pos", ag["pos"])
+		elif st == "driving_outbound" or st == "driving_return" or st == "driving_to_depot" or st == "driving_from_depot":
 			_update_driving_agent(ag, rt, tdef, lane_buckets, dt)
 
 func _update_loading_agent(ag: Dictionary, rt: Dictionary, dt: float) -> void:
@@ -1797,7 +2354,7 @@ func _update_loading_agent(ag: Dictionary, rt: Dictionary, dt: float) -> void:
 		ag["cargoGood"] = good_to_load
 		ag["cargoQty"] = take
 		ag["departedSec"] = real_time_sec
-		var win_sec: float = float(rt["clearTimeForwardSec"]) * 1.35 + 3.0
+		var win_sec: float = float(rt["clearTimeForwardSec"]) * GameCatalog.EXPRESS_DEADLINE_MULT + GameCatalog.EXPRESS_DEADLINE_PAD_SEC
 		ag["expressWindowSec"] = win_sec
 		ag["expressDeadlineSec"] = real_time_sec + win_sec
 		ag["expressBonusLocked"] = -1.0
@@ -1807,6 +2364,9 @@ func _update_loading_agent(ag: Dictionary, rt: Dictionary, dt: float) -> void:
 		ag["waitSec"] = 0.0
 		ag["waitReason"] = "none"
 		ag["lastIssue"] = ""
+		var pad_from: Vector2 = get_facility_pad_world_pos(f_from, "output", good_to_load)
+		for _h in range(mini(take, 2)):
+			launch_cargo_hop(good_to_load, pad_from, f_from["pos"])
 	else:
 		ag["waitSec"] = float(ag["waitSec"]) + dt
 		ag["waitReason"] = "cargo_wait"
@@ -1863,13 +2423,17 @@ func _update_unloading_agent(ag: Dictionary, rt: Dictionary, dt: float) -> void:
 			if String(ag["model"]) == "express":
 				var locked_b: float = float(ag.get("expressBonusLocked", -1.0))
 				is_express_hit = (locked_b > 0.0) if locked_b >= 0.0 else (real_time_sec <= float(ag["expressDeadlineSec"]))
-			var bonus: int = 2 if is_express_hit else 1
+			var bonus: int = int(GameCatalog.EXPRESS_BONUS_FACTOR) if is_express_hit else 1
 			var payout: int = int(gdef["value"]) * c_qty * bonus
 			cash += payout
 			rt["totalRevenue"] = int(rt["totalRevenue"]) + payout
 			rt["deliveriesCount"] = int(rt["deliveriesCount"]) + c_qty
 			revenue_events.append({"t": real_time_sec, "amount": payout})
 			_record_delivery(String(rt["fromFacilityId"]), String(f_to["id"]), c_good, c_qty)
+			var pad_role: String = "input" if fk == "factory" else ("yard" if (fk == "station" or fk == "harbour") else "")
+			var dst_pad: Vector2 = get_facility_pad_world_pos(f_to, pad_role, c_good) if pad_role != "" else f_to["pos"] + Vector2(0.0, -8.0)
+			for _h in range(mini(c_qty, 2)):
+				launch_cargo_hop(c_good, f_to["pos"], dst_pad)
 			var toast_txt: String = ("⚡+" if is_express_hit else "+") + GameCatalog.fmt_cash(payout)
 			spawn_toast(f_to["pos"] + Vector2(0, -16), toast_txt, Color("#f59f00") if is_express_hit else Color("#2b8a3e"))
 			if sfx:
@@ -1884,7 +2448,9 @@ func _update_unloading_agent(ag: Dictionary, rt: Dictionary, dt: float) -> void:
 				return
 			var scrap_pay: int = maxi(1, int(round(float(int(gdef["value"]) * c_qty) * 0.10)))
 			cash += scrap_pay
+			f_to["scrappedCount"] = int(f_to.get("scrappedCount", 0)) + c_qty
 			revenue_events.append({"t": real_time_sec, "amount": scrap_pay})
+			launch_cargo_crumble(c_good, f_to["pos"])
 			spawn_toast(f_to["pos"] + Vector2(0, -14), "Scrap +" + GameCatalog.fmt_cash(scrap_pay), Color("#868e96"))
 			ag["lastIssue"] = "Kargo di-scrap di %s (gudang penuh)" % String(f_to["name"])
 			ag["cargoGood"] = ""
@@ -1899,9 +2465,7 @@ func _update_unloading_agent(ag: Dictionary, rt: Dictionary, dt: float) -> void:
 
 func _get_agent_current_step(ag: Dictionary) -> Dictionary:
 	var rt: Dictionary = get_route(String(ag["routeId"]))
-	if rt.is_empty():
-		return {}
-	var path: Array = rt["forwardPath"] if String(ag["state"]) == "driving_outbound" else rt["returnPath"]
+	var path: Array = _get_agent_active_path(ag, rt)
 	var idx: int = int(ag["stepIndex"])
 	if idx < 0 or idx >= path.size():
 		return {}
@@ -2021,7 +2585,7 @@ func _sample_agent_step_pose(path: Array, step_idx: int, visual_lane: float, s_p
 	}
 
 func _update_driving_agent(ag: Dictionary, rt: Dictionary, tdef: Dictionary, lane_buckets: Dictionary, dt: float) -> void:
-	var path: Array = rt["forwardPath"] if String(ag["state"]) == "driving_outbound" else rt["returnPath"]
+	var path: Array = _get_agent_active_path(ag, rt)
 	var s_idx: int = int(ag["stepIndex"])
 	if s_idx >= path.size():
 		_finish_agent_leg(ag, rt)
@@ -2081,6 +2645,7 @@ func _update_driving_agent(ag: Dictionary, rt: Dictionary, tdef: Dictionary, lan
 		target_v *= 0.85
 
 	ag["waitReason"] = "none"
+	ag["blockerAgentId"] = ""
 
 	if not leader.is_empty():
 		var leader_body: float = float(GameCatalog.TRUCKS[String(leader["model"])]["body_len"])
@@ -2088,9 +2653,11 @@ func _update_driving_agent(ag: Dictionary, rt: Dictionary, tdef: Dictionary, lan
 		if gap < 8.5:
 			target_v = 0.0
 			ag["waitReason"] = "following"
+			ag["blockerAgentId"] = String(leader["id"])
 		elif gap < 26.0:
 			target_v = minf(target_v, float(leader["speedPx"]) * 0.90)
 			ag["waitReason"] = "following"
+			ag["blockerAgentId"] = String(leader["id"])
 
 	var cab_stop_line: float = maxf(0.0, stop_s - float(tdef["cab_len"]) * 0.48 - 1.4)
 	var dist_to_stop: float = cab_stop_line - float(ag["sPx"])
@@ -2115,15 +2682,18 @@ func _update_driving_agent(ag: Dictionary, rt: Dictionary, tdef: Dictionary, lan
 					if dist_to_stop <= 3.2:
 						target_v = 0.0
 						ag["waitReason"] = "red_light"
+						ag["blockerAgentId"] = ""
 					else:
 						target_v = minf(target_v, maxf(5.5, dist_to_stop * 0.95))
 			elif ctrl == "yield":
 				# Update 1.9 authentic rule: ONLY minor arms check/yield; priority main-road trucks keep full road speed!
 				var is_minor: bool = (j_ahead["yieldMinorEdgeIds"] as Array).has(eid)
 				if is_minor:
-					if dist_to_stop <= 8.5 and float(ag["junctionWaitSec"]) < 1.35 and _has_junction_conflict(String(j_ahead["id"]), eid):
+					var conflict_id: String = _find_junction_conflict_agent(String(j_ahead["id"]), eid)
+					if dist_to_stop <= 8.5 and float(ag["junctionWaitSec"]) < 1.35 and conflict_id != "":
 						target_v = 0.0
 						ag["waitReason"] = "yield"
+						ag["blockerAgentId"] = conflict_id
 					elif dist_to_stop < 22.0:
 						target_v = minf(target_v, 28.0)
 			elif ctrl == "roundabout" or ctrl == "roundabout2":
@@ -2132,6 +2702,7 @@ func _update_driving_agent(ag: Dictionary, rt: Dictionary, tdef: Dictionary, lan
 				if dist_to_stop <= 7.0 and float(ag["junctionWaitSec"]) < 0.95 and _count_near_junction(String(j_ahead["id"]), rb_rad) >= cap_rb:
 					target_v = 0.0
 					ag["waitReason"] = "roundabout"
+					ag["blockerAgentId"] = _find_nearest_junction_agent(String(j_ahead["id"]), rb_rad, String(ag["id"]))
 				else:
 					target_v = minf(target_v, 36.0 if ctrl == "roundabout2" else 28.0)
 		elif float(ag["sPx"]) > cab_stop_line + 1.5:
@@ -2189,52 +2760,94 @@ func _update_driving_agent(ag: Dictionary, rt: Dictionary, tdef: Dictionary, lan
 	ag["pos"] = pose["pos"]
 	ag["heading"] = pose["heading"]
 
-	var t_poses: Array = ag["trailerPoses"]
-	var spacing: float = 8.6
-	for ti in range(t_poses.size()):
-		var tr_s: float = float(ag["sPx"]) - float(ti + 1) * spacing
+	var units: Array[Dictionary] = GameCatalog.get_truck_units(String(ag["model"]))
+	var cab_mid: float = (float(units[0]["front"]) + float(units[0]["rear"])) * 0.5
+	var uposes: Array = ag.get("unitPoses", [])
+	if uposes.size() != units.size():
+		uposes = _make_initial_unit_poses(String(ag["model"]), ag["pos"], float(ag["heading"]))
+		ag["unitPoses"] = uposes
+	uposes[0]["pos"] = ag["pos"]
+	uposes[0]["heading"] = ag["heading"]
+
+	for ui in range(1, units.size()):
+		var u_mid: float = (float(units[ui]["front"]) + float(units[ui]["rear"])) * 0.5
+		var back_px: float = (u_mid - cab_mid) * GameCatalog.TRUCK_VIEW_SCALE
+		var tr_s: float = float(ag["sPx"]) - back_px
 		if tr_s >= 0.0:
 			var tp: Dictionary = _sample_agent_step_pose(path, s_idx, float(ag["visualLane"]), tr_s)
-			t_poses[ti]["pos"] = tp["pos"]
-			t_poses[ti]["heading"] = tp["heading"]
+			uposes[ui]["pos"] = tp["pos"]
+			uposes[ui]["heading"] = tp["heading"]
 		elif s_idx > 0 and road_map.has(String(path[s_idx - 1]["edgeId"])):
 			var prev_traj: Dictionary = _get_step_trajectory(path, s_idx - 1, int(ag["laneIndex"]))
 			var prev_s: float = maxf(0.0, float(prev_traj["total_len"]) + tr_s)
 			var tp_prev: Dictionary = _sample_agent_step_pose(path, s_idx - 1, float(ag["visualLane"]), prev_s)
-			t_poses[ti]["pos"] = tp_prev["pos"]
-			t_poses[ti]["heading"] = tp_prev["heading"]
+			uposes[ui]["pos"] = tp_prev["pos"]
+			uposes[ui]["heading"] = tp_prev["heading"]
 		else:
-			var lead_p: Vector2 = ag["pos"] if ti == 0 else t_poses[ti - 1]["pos"]
-			var cur_p: Vector2 = t_poses[ti]["pos"]
+			var lead_p: Vector2 = uposes[ui - 1]["pos"]
+			var cur_p: Vector2 = uposes[ui]["pos"]
+			var prev_u_mid: float = (float(units[ui - 1]["front"]) + float(units[ui - 1]["rear"])) * 0.5
+			var seg_len: float = maxf(1.5, (u_mid - prev_u_mid) * GameCatalog.TRUCK_VIEW_SCALE)
 			var delta_v: Vector2 = lead_p - cur_p
-			var ang: float = float(ag["heading"]) if delta_v.length_squared() < 0.01 else atan2(delta_v.y, delta_v.x)
-			t_poses[ti]["heading"] = ang
-			t_poses[ti]["pos"] = lead_p - Vector2(cos(ang), sin(ang)) * spacing
+			var ang: float = float(uposes[ui - 1]["heading"]) if delta_v.length_squared() < 0.005 else atan2(delta_v.y, delta_v.x)
+			uposes[ui]["heading"] = ang
+			uposes[ui]["pos"] = lead_p - Vector2(cos(ang), sin(ang)) * seg_len
+
+	ag["trailerPoses"] = uposes.slice(1)
 
 func _finish_agent_leg(ag: Dictionary, rt: Dictionary) -> void:
 	ag["speedPx"] = 0.0
 	ag["turnSignal"] = 0
-	if String(ag["state"]) == "driving_outbound":
+	ag["blockerAgentId"] = ""
+	var st := String(ag["state"])
+	if st == "driving_outbound":
 		ag["state"] = "queuing_bay"
 		ag["pos"] = facility_map[String(rt["toFacilityId"])]["pos"]
+	elif st == "driving_to_depot":
+		ag["state"] = "at_depot"
+		ag["dwellSec"] = 1.4
+		ag["pos"] = depot.get("pos", ag["pos"])
+		var d_ang: float = float(depot.get("angle", 0.0))
+		ag["heading"] = d_ang
+		var uposes: Array = _make_initial_unit_poses(String(ag["model"]), ag["pos"], d_ang)
+		ag["unitPoses"] = uposes
+		ag["trailerPoses"] = uposes.slice(1)
 	else:
 		ag["state"] = "loading"
 		ag["dwellSec"] = 0.55
 		ag["waitSec"] = 0.0
 		ag["pos"] = facility_map[String(rt["fromFacilityId"])]["pos"]
 
-func _has_junction_conflict(j_id: String, minor_edge_id: String) -> bool:
+func _find_junction_conflict_agent(j_id: String, minor_edge_id: String) -> String:
 	var jp: Vector2 = junction_map[j_id]["pos"]
 	for other in agents:
 		var st := String(other["state"])
-		if st != "driving_outbound" and st != "driving_return":
+		if st != "driving_outbound" and st != "driving_return" and st != "driving_to_depot" and st != "driving_from_depot":
 			continue
 		var sd: Dictionary = _get_agent_current_step(other)
 		if sd.is_empty() or String(sd["edgeId"]) == minor_edge_id:
 			continue
 		if String(sd["toJunctionId"]) == j_id and (other["pos"] as Vector2).distance_to(jp) < 34.0 and float(other["speedPx"]) > 5.0:
-			return true
-	return false
+			return String(other["id"])
+	return ""
+
+func _has_junction_conflict(j_id: String, minor_edge_id: String) -> bool:
+	return _find_junction_conflict_agent(j_id, minor_edge_id) != ""
+
+func _find_nearest_junction_agent(j_id: String, rad: float, exclude_id: String) -> String:
+	var jp: Vector2 = junction_map[j_id]["pos"]
+	var best_id := ""
+	var best_d := rad
+	for other in agents:
+		var oid := String(other["id"])
+		if oid == exclude_id:
+			continue
+		var d: float = (other["pos"] as Vector2).distance_to(jp)
+		if d < best_d:
+			best_d = d
+			best_id = oid
+	return best_id
+
 
 func _count_near_junction(j_id: String, rad: float) -> int:
 	var jp: Vector2 = junction_map[j_id]["pos"]
@@ -2477,19 +3090,22 @@ func save_to_disk() -> void:
 	for f in facilities:
 		save_facs.append({
 			"id": f["id"], "up": f["upgrades"],
-			"out": f["outputBuffer"], "pile": f.get("yardPile", [])
+			"out": f["outputBuffer"], "in": f.get("inputBuffers", {}),
+			"pile": f.get("yardPile", []), "scrap": f.get("scrappedCount", 0)
 		})
 	var save_routes: Array = []
 	for rt in routes:
 		save_routes.append({
 			"from": rt["fromFacilityId"], "to": rt["toFacilityId"],
 			"good": rt["goodFilter"], "wps": rt["waypoints"],
+			"wpsBack": rt.get("waypointsBack", []),
 			"swb": rt.get("sameWayBack", true),
+			"col": (rt["color"] as Color).to_html(false),
 			"model": rt["truckModel"], "cnt": (rt["activeTruckIds"] as Array).size()
 		})
 
 	var payload := {
-		"v": 2,
+		"v": 3,
 		"cash": cash,
 		"time": real_time_sec,
 		"lht": left_hand_traffic,
@@ -2523,6 +3139,7 @@ func _restore_save(map_id: String) -> bool:
 	if typeof(data) != TYPE_DICTIONARY:
 		return false
 	var d: Dictionary = data
+	var save_v: int = int(d.get("v", 2))
 	cash = int(d.get("cash", 3500))
 	real_time_sec = float(d.get("time", 0.0))
 	left_hand_traffic = bool(d.get("lht", true))
@@ -2566,17 +3183,29 @@ func _restore_save(map_id: String) -> bool:
 	for sf in d.get("facs", []):
 		var fm: Dictionary = facility_map.get(String(sf["id"]), {})
 		if not fm.is_empty():
-			fm["upgrades"] = sf["up"]
+			var up_d: Dictionary = (sf["up"] as Dictionary).duplicate(true)
+			var raw_bays: int = int(up_d.get("bays", 0))
+			if save_v < 3 and raw_bays > 0:
+				raw_bays -= 1
+			up_d["bays"] = clampi(raw_bays, 0, 7)
+			fm["upgrades"] = up_d
 			fm["outputBuffer"] = int(sf["out"])
+			if sf.has("in") and typeof(sf["in"]) == TYPE_DICTIONARY:
+				fm["inputBuffers"] = (sf["in"] as Dictionary).duplicate(true)
 			if sf.has("pile") and typeof(sf["pile"]) == TYPE_ARRAY:
-				fm["yardPile"] = sf["pile"]
+				fm["yardPile"] = (sf["pile"] as Array).duplicate()
+			fm["scrappedCount"] = int(sf.get("scrap", 0))
 	for srt in d.get("routes", []):
 		var created: Dictionary = create_route(String(srt["from"]), String(srt["to"]), String(srt["good"]), false)
 		if not created.is_empty():
-			created["waypoints"] = srt["wps"]
+			created["waypoints"] = (srt.get("wps", []) as Array).duplicate()
+			created["waypointsBack"] = (srt.get("wpsBack", []) as Array).duplicate()
 			created["sameWayBack"] = bool(srt.get("swb", true))
+			if srt.has("col"):
+				created["color"] = Color.from_string("#" + String(srt["col"]).trim_prefix("#"), created["color"])
 			created["truckModel"] = String(srt["model"])
 			recompute_single_route(created)
 			for _k in range(int(srt["cnt"])):
 				add_truck_to_route(String(created["id"]), true)
 	return true
+
