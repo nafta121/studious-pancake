@@ -204,6 +204,10 @@ func _hydrate_geometry() -> void:
 		r["aabb"] = Rect2(min_x - 24.0, min_y - 24.0, (max_x - min_x) + 48.0, (max_y - min_y) + 48.0)
 		r["congestionEMA"] = float(r.get("congestionEMA", 0.0))
 		r["pocketLevel"] = int(r.get("pocketLevel", 0))
+		var init_pk: int = int(r["pocketLevel"])
+		r["pocketSize"] = clampi(int(r.get("pocketSize", maxi(0, init_pk - 1) if init_pk > 0 else 1)), 0, 2)
+		r["approachLanesForward"] = clampi(int(r.get("approachLanesForward", int(r["lanesForward"]) + (1 if init_pk > 0 else 0))), int(r["lanesForward"]), 4)
+		r["approachLanesBackward"] = clampi(int(r.get("approachLanesBackward", int(r["lanesBackward"]) + (1 if init_pk > 0 else 0))), int(r["lanesBackward"]), 4)
 		r["turnMaskForward"] = int(r.get("turnMaskForward", RoutePathfinder.TURN_ALL))
 		r["turnMaskBackward"] = int(r.get("turnMaskBackward", RoutePathfinder.TURN_ALL))
 
@@ -1220,8 +1224,10 @@ func modify_road_lanes(edge_id: String, delta: int, dir_mode: String = "both") -
 		cash -= price
 		if edit_f:
 			r["lanesForward"] = lf + 1
+			r["approachLanesForward"] = maxi(RoadGeom.get_effective_approach_lanes(r, true), int(r["lanesForward"]))
 		if edit_b:
 			r["lanesBackward"] = lb + 1
+			r["approachLanesBackward"] = maxi(RoadGeom.get_effective_approach_lanes(r, false), int(r["lanesBackward"]))
 		spawn_toast(mid, "-" + GameCatalog.fmt_cash(price), Color("#e67e22"))
 		_refresh_network_geometry()
 		map_static_dirty.emit()
@@ -1237,14 +1243,86 @@ func modify_road_lanes(edge_id: String, delta: int, dir_mode: String = "both") -
 		cash += refund
 		if edit_f:
 			r["lanesForward"] = lf - 1
+			r["approachLanesForward"] = clampi(int(r.get("approachLanesForward", lf - 1)), int(r["lanesForward"]), 4)
 		if edit_b:
 			r["lanesBackward"] = lb - 1
+			r["approachLanesBackward"] = clampi(int(r.get("approachLanesBackward", lb - 1)), int(r["lanesBackward"]), 4)
 		spawn_toast(mid, "+" + GameCatalog.fmt_cash(refund), Color("#2b8a3e"))
 		_refresh_network_geometry()
 		map_static_dirty.emit()
 		if sfx:
 			sfx.play_ui("remove")
 		return "%s: %d/%d lajur (+%s)" % [String(r["name"]), int(r["lanesForward"]), int(r["lanesBackward"]), GameCatalog.fmt_cash(refund)]
+
+
+func modify_junction_approach_lanes(edge_id: String, delta: int, forward_dir: bool = true) -> String:
+	if not road_map.has(edge_id):
+		return ""
+	var r: Dictionary = road_map[edge_id]
+	if not bool(r["isBuilt"]) or not unlocked_regions.has(int(r["regionIndex"])):
+		return ""
+	var ow: int = int(r["oneWay"])
+	if (forward_dir and ow < 0) or ((not forward_dir) and ow > 0):
+		return "Arah ini tidak aktif pada jalan satu arah"
+
+	var main_l: int = int(r["lanesForward"] if forward_dir else r["lanesBackward"])
+	var cur_app: int = RoadGeom.get_effective_approach_lanes(r, forward_dir)
+	var key := "approachLanesForward" if forward_dir else "approachLanesBackward"
+	var pts: PackedVector2Array = r["pts"]
+	var anchor: Vector2 = pts[pts.size() - 1] if forward_dir else pts[0]
+	var step_p: int = int(GameCatalog.INFRA_PRICES["pocket"])
+
+	if delta > 0:
+		if cur_app >= 4:
+			return "Maksimal 4 lajur simpang"
+		if cash < step_p:
+			if sfx:
+				sfx.warn()
+			return "Kas kurang (%s)" % GameCatalog.fmt_cash(step_p)
+		cash -= step_p
+		r[key] = cur_app + 1
+		if not r.has("pocketSize"):
+			r["pocketSize"] = 1
+		spawn_toast(anchor, "-" + GameCatalog.fmt_cash(step_p), Color("#e67e22"))
+		_refresh_network_geometry()
+		map_static_dirty.emit()
+		if sfx:
+			sfx.play_ui("place")
+		return "%s (%s): %d lajur di simpang" % [String(r["name"]), "Fwd" if forward_dir else "Back", int(r[key])]
+	else:
+		if cur_app <= main_l:
+			return "Minimal mengikuti lajur utama (%d)" % main_l
+		var refund: int = int(round(float(step_p) * 0.5))
+		cash += refund
+		r[key] = cur_app - 1
+		if int(r.get("approachLanesForward", int(r["lanesForward"]))) <= int(r["lanesForward"]) and int(r.get("approachLanesBackward", int(r["lanesBackward"]))) <= int(r["lanesBackward"]):
+			r["pocketLevel"] = 0
+		spawn_toast(anchor, "+" + GameCatalog.fmt_cash(refund), Color("#2b8a3e"))
+		_refresh_network_geometry()
+		map_static_dirty.emit()
+		if sfx:
+			sfx.play_ui("remove")
+		return "%s (%s): %d lajur di simpang (+%s)" % [String(r["name"]), "Fwd" if forward_dir else "Back", int(r[key]), GameCatalog.fmt_cash(refund)]
+
+
+func cycle_road_pocket_size(edge_id: String) -> String:
+	if not road_map.has(edge_id):
+		return ""
+	var r: Dictionary = road_map[edge_id]
+	if not bool(r["isBuilt"]) or not unlocked_regions.has(int(r["regionIndex"])):
+		return ""
+	var cur_sz: int = RoadGeom.get_effective_pocket_size(r)
+	var nxt_sz: int = (cur_sz + 1) % 3
+	r["pocketSize"] = nxt_sz
+	if int(r.get("pocketLevel", 0)) > 0:
+		r["pocketLevel"] = nxt_sz + 1
+	_refresh_network_geometry()
+	map_static_dirty.emit()
+	if sfx:
+		sfx.play_ui("edit")
+	var sz_names: Array[String] = ["Short", "Medium", "Long"]
+	return "%s Pocket Length: %s" % [String(r["name"]), sz_names[nxt_sz]]
+
 
 func cycle_road_pocket(edge_id: String) -> String:
 	if not road_map.has(edge_id):
@@ -1257,19 +1335,25 @@ func cycle_road_pocket(edge_id: String) -> String:
 	var pts: PackedVector2Array = r["pts"]
 	var mid: Vector2 = pts[pts.size() / 2]
 	var step_p: int = int(GameCatalog.INFRA_PRICES["pocket"])
-	if nxt > cur:
+	if cur == 0 and nxt == 1:
 		if cash < step_p:
 			if sfx:
 				sfx.warn()
 			return "Kas kurang untuk Kantong Belok (%s)" % GameCatalog.fmt_cash(step_p)
 		cash -= step_p
 		spawn_toast(mid, "-" + GameCatalog.fmt_cash(step_p), Color("#e67e22"))
-	else:
-		var refund: int = int(round(float(step_p * cur) * 0.5))
-		if refund > 0:
-			cash += refund
-			spawn_toast(mid, "+" + GameCatalog.fmt_cash(refund), Color("#2b8a3e"))
+	elif nxt == 0 and cur > 0:
+		var refund: int = int(round(float(step_p) * 0.5))
+		cash += refund
+		spawn_toast(mid, "+" + GameCatalog.fmt_cash(refund), Color("#2b8a3e"))
 	r["pocketLevel"] = nxt
+	if nxt > 0:
+		r["pocketSize"] = nxt - 1
+		r["approachLanesForward"] = mini(4, maxi(int(r["lanesForward"]) + 1, int(r.get("approachLanesForward", 1))))
+		r["approachLanesBackward"] = mini(4, maxi(int(r["lanesBackward"]) + 1, int(r.get("approachLanesBackward", 1))))
+	else:
+		r["approachLanesForward"] = int(r["lanesForward"])
+		r["approachLanesBackward"] = int(r["lanesBackward"])
 	_refresh_network_geometry()
 	map_static_dirty.emit()
 	if sfx:
@@ -1829,7 +1913,6 @@ func _get_step_trajectory(path: Array, step_idx: int, lane_idx: int) -> Dictiona
 	var edge: Dictionary = road_map[eid]
 	var forward: bool = bool(step_d["forward"])
 	var lanes_dir: int = maxi(1, int(edge["lanesForward"]) if forward else int(edge["lanesBackward"]))
-	var opp_lanes: int = maxi(1, int(edge["lanesBackward"]) if forward else int(edge["lanesForward"]))
 	var clamped_lane: int = clampi(lane_idx, 0, lanes_dir - 1)
 
 	var has_next: bool = (step_idx + 1) < path.size() and road_map.has(String(path[step_idx + 1]["edgeId"]))
@@ -1844,6 +1927,7 @@ func _get_step_trajectory(path: Array, step_idx: int, lane_idx: int) -> Dictiona
 	var rlen: float = float(edge["lengthPx"])
 	var trim_in: float = float(edge.get("trimStart", 0.0)) if forward else float(edge.get("trimEnd", 0.0))
 	var trim_out: float = float(edge.get("trimEnd", 0.0)) if forward else float(edge.get("trimStart", 0.0))
+	var use_explicit_geom: bool = (step_idx > 0 and has_next)
 	if step_idx == 0:
 		trim_in = minf(trim_in, rlen * 0.25)
 	if not has_next:
@@ -1852,43 +1936,57 @@ func _get_step_trajectory(path: Array, step_idx: int, lane_idx: int) -> Dictiona
 	var s_begin: float = clampf(trim_in, 0.0, maxf(0.0, rlen - 3.0))
 	var s_finish: float = clampf(rlen - trim_out, s_begin + 2.5, rlen)
 
-	var stitched := PackedVector2Array()
-	var sample_count: int = maxi(4, int(ceil((s_finish - s_begin) / 5.5)))
-	for i in range(sample_count + 1):
-		var s_val: float = lerpf(s_begin, s_finish, float(i) / float(sample_count))
-		var rp: Dictionary = RoadGeom.sample_road_pose(
-			edge["pts"], edge["cum_len"], rlen, int(edge["oneWay"]),
-			forward, s_val, float(clamped_lane), lanes_dir, left_hand_traffic, opp_lanes
-		)
-		var vp: Vector2 = rp["pos"]
-		if stitched.is_empty() or stitched[stitched.size() - 1].distance_to(vp) > 0.08:
-			stitched.append(vp)
-
-	var cum_road: PackedFloat32Array = RoadGeom.build_cum_lengths(stitched)
-	var stop_s: float = cum_road[cum_road.size() - 1] if cum_road.size() > 0 else 4.0
-
 	var turn_sig: int = 0
+	var use_pocket: bool = false
+	var j_ahead: Dictionary = {}
+	var nxt_edge: Dictionary = {}
+	var nxt_fwd: bool = true
 	if has_next:
-		var j_ahead: Dictionary = junction_map.get(String(step_d["toJunctionId"]), {})
+		j_ahead = junction_map.get(String(step_d["toJunctionId"]), {})
 		if not j_ahead.is_empty():
 			var nxt_step: Dictionary = path[step_idx + 1]
 			var nxt_eid := String(nxt_step["edgeId"])
-			var nxt_edge: Dictionary = road_map[nxt_eid]
-			var nxt_fwd: bool = bool(nxt_step["forward"])
+			nxt_edge = road_map[nxt_eid]
+			nxt_fwd = bool(nxt_step["forward"])
 			var t_bit: int = RoutePathfinder.classify_turn_bit(junction_map, road_map, eid, forward, String(j_ahead["id"]), nxt_eid, nxt_fwd)
 			if t_bit == RoutePathfinder.TURN_LEFT:
 				turn_sig = -1
 			elif t_bit == RoutePathfinder.TURN_RIGHT:
 				turn_sig = 1
-			var nxt_lanes: int = maxi(1, int(nxt_edge["lanesForward"]) if nxt_fwd else int(nxt_edge["lanesBackward"]))
-			var out_lane: int = mini(clamped_lane, nxt_lanes - 1)
-			var conn: PackedVector2Array = RoadGeom.build_turn_connector_pts(
-				j_ahead, edge, forward, float(clamped_lane), lanes_dir,
-				nxt_edge, nxt_fwd, float(out_lane), nxt_lanes, left_hand_traffic
+			var is_kerbside_turn: bool = (turn_sig == -1) if left_hand_traffic else (turn_sig == 1)
+			var app_lanes: int = RoadGeom.get_effective_approach_lanes(edge, forward)
+			use_pocket = (use_explicit_geom and is_kerbside_turn and app_lanes > lanes_dir and clamped_lane == 0)
+
+	var stitched: PackedVector2Array
+	if use_explicit_geom:
+		stitched = RoadGeom.build_edge_lane_polyline(edge, forward, clamped_lane, use_pocket, s_begin, s_finish, left_hand_traffic)
+	else:
+		var opp_lanes: int = maxi(1, int(edge["lanesBackward"]) if forward else int(edge["lanesForward"]))
+		stitched = PackedVector2Array()
+		var sample_count: int = maxi(4, int(ceil((s_finish - s_begin) / 5.5)))
+		for i in range(sample_count + 1):
+			var s_val: float = lerpf(s_begin, s_finish, float(i) / float(sample_count))
+			var rp: Dictionary = RoadGeom.sample_road_pose(
+				edge["pts"], edge["cum_len"], rlen, int(edge["oneWay"]),
+				forward, s_val, float(clamped_lane), lanes_dir, left_hand_traffic, opp_lanes
 			)
-			for cp in conn:
-				if stitched.is_empty() or stitched[stitched.size() - 1].distance_to(cp) > 0.08:
-					stitched.append(cp)
+			var vp: Vector2 = rp["pos"]
+			if stitched.is_empty() or stitched[stitched.size() - 1].distance_to(vp) > 0.08:
+				stitched.append(vp)
+
+	var cum_road: PackedFloat32Array = RoadGeom.build_cum_lengths(stitched)
+	var stop_s: float = cum_road[cum_road.size() - 1] if cum_road.size() > 0 else 4.0
+
+	if has_next and not j_ahead.is_empty() and not nxt_edge.is_empty():
+		var nxt_lanes: int = maxi(1, int(nxt_edge["lanesForward"]) if nxt_fwd else int(nxt_edge["lanesBackward"]))
+		var out_lane: int = mini(clamped_lane, nxt_lanes - 1)
+		var conn: PackedVector2Array = RoadGeom.build_turn_connector_pts(
+			j_ahead, edge, forward, float(clamped_lane), lanes_dir,
+			nxt_edge, nxt_fwd, float(out_lane), nxt_lanes, left_hand_traffic, use_pocket
+		)
+		for cp in conn:
+			if stitched.is_empty() or stitched[stitched.size() - 1].distance_to(cp) > 0.08:
+				stitched.append(cp)
 
 	var cum_all: PackedFloat32Array = RoadGeom.build_cum_lengths(stitched)
 	var tot_l: float = maxf(4.0, cum_all[cum_all.size() - 1] if cum_all.size() > 0 else 4.0)
@@ -2363,6 +2461,9 @@ func save_to_disk() -> void:
 			"id": r["id"], "lf": r["lanesForward"], "lb": r["lanesBackward"],
 			"ow": r["oneWay"], "cl": r["closed"], "built": r["isBuilt"],
 			"pk": r.get("pocketLevel", 0),
+			"ps": r.get("pocketSize", 1),
+			"alf": RoadGeom.get_effective_approach_lanes(r, true),
+			"alb": RoadGeom.get_effective_approach_lanes(r, false),
 			"tmf": r.get("turnMaskForward", 7),
 			"tmb": r.get("turnMaskBackward", 7)
 		})
@@ -2447,7 +2548,11 @@ func _restore_save(map_id: String) -> bool:
 			rm["oneWay"] = int(sr["ow"])
 			rm["closed"] = bool(sr["cl"])
 			rm["isBuilt"] = bool(sr["built"])
-			rm["pocketLevel"] = int(sr.get("pk", 0))
+			var spk: int = int(sr.get("pk", 0))
+			rm["pocketLevel"] = spk
+			rm["pocketSize"] = clampi(int(sr.get("ps", maxi(0, spk - 1) if spk > 0 else 1)), 0, 2)
+			rm["approachLanesForward"] = clampi(int(sr.get("alf", int(rm["lanesForward"]) + (1 if spk > 0 else 0))), int(rm["lanesForward"]), 4)
+			rm["approachLanesBackward"] = clampi(int(sr.get("alb", int(rm["lanesBackward"]) + (1 if spk > 0 else 0))), int(rm["lanesBackward"]), 4)
 			rm["turnMaskForward"] = int(sr.get("tmf", 7))
 			rm["turnMaskBackward"] = int(sr.get("tmb", 7))
 	for sj in d.get("juncs", []):

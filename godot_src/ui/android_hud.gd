@@ -2088,17 +2088,26 @@ func _build_authentic_road_panel() -> void:
 		close_drawer()
 		return
 	var r: Dictionary = sim.road_map[rid]
-	var pk_lvl: int = clampi(int(r.get("pocketLevel", 0)), 0, 3)
+	var lf: int = int(r["lanesForward"])
+	var lb: int = int(r["lanesBackward"])
+	var af: int = RoadGeom.get_effective_approach_lanes(r, true)
+	var ab: int = RoadGeom.get_effective_approach_lanes(r, false)
+	var pk_sz: int = RoadGeom.get_effective_pocket_size(r)
+	var pk_names: Array[String] = ["Short", "Medium", "Long"]
 	var tmf: int = int(r.get("turnMaskForward", 7))
 	var tmb: int = int(r.get("turnMaskBackward", 7))
 	_inspector_title.text = String(r["name"])
-	_inspector_sub.text = "Class: %s · Lanes %d/%d · Pocket: %s · Congestion: %d%%" % [
+	_inspector_sub.text = "Class: %s · Road %d/%d · Junction %d/%d · Pocket: %s · %d%%" % [
 		String(r["roadClass"]).to_upper(),
-		int(r["lanesForward"]),
-		int(r["lanesBackward"]),
-		GameCatalog.POCKET_LABELS[pk_lvl],
+		lf, lb, af, ab,
+		pk_names[pk_sz],
 		int(round(float(r["congestionEMA"]) * 100.0))
 	]
+
+	var sec_road := Label.new()
+	sec_road.theme_type_variation = &"CaptionLabel"
+	sec_road.text = "Lanes along the road (1–4 per direction):"
+	_inspector_body.add_child(sec_road)
 
 	var dir_grid := GridContainer.new()
 	dir_grid.columns = 2
@@ -2107,10 +2116,10 @@ func _build_authentic_road_panel() -> void:
 	_inspector_body.add_child(dir_grid)
 
 	for dact in [
-		["+ Lane (Both)", func(): show_toast_banner(sim.modify_road_lanes(rid, 1, "both")); _populate_drawer(), true],
-		["− Lane (Both)", func(): show_toast_banner(sim.modify_road_lanes(rid, -1, "both")); _populate_drawer(), false],
-		["+ Fwd Lane", func(): show_toast_banner(sim.modify_road_lanes(rid, 1, "forward")); _populate_drawer(), false],
-		["+ Back Lane", func(): show_toast_banner(sim.modify_road_lanes(rid, 1, "backward")); _populate_drawer(), false],
+		["+ Road Lane (Both)", func(): show_toast_banner(sim.modify_road_lanes(rid, 1, "both")); _populate_drawer(), true],
+		["− Road Lane (Both)", func(): show_toast_banner(sim.modify_road_lanes(rid, -1, "both")); _populate_drawer(), false],
+		["+ Fwd (%d→%d)" % [lf, mini(4, lf + 1)], func(): show_toast_banner(sim.modify_road_lanes(rid, 1, "forward")); _populate_drawer(), false],
+		["+ Back (%d→%d)" % [lb, mini(4, lb + 1)], func(): show_toast_banner(sim.modify_road_lanes(rid, 1, "backward")); _populate_drawer(), false],
 	]:
 		var db := Button.new()
 		if bool(dact[2]):
@@ -2122,13 +2131,38 @@ func _build_authentic_road_panel() -> void:
 		db.pressed.connect(dact[1] as Callable)
 		dir_grid.add_child(db)
 
+	var sec_junc := Label.new()
+	sec_junc.theme_type_variation = &"CaptionLabel"
+	sec_junc.text = "Lanes at junction / Turn pockets ($1,125):"
+	_inspector_body.add_child(sec_junc)
+
+	var junc_grid := GridContainer.new()
+	junc_grid.columns = 2
+	junc_grid.add_theme_constant_override("h_separation", 6)
+	junc_grid.add_theme_constant_override("v_separation", 6)
+	_inspector_body.add_child(junc_grid)
+
+	for jact in [
+		["+ Fwd Pocket (%d)" % af, func(): show_toast_banner(sim.modify_junction_approach_lanes(rid, 1, true)); _populate_drawer()],
+		["− Fwd Pocket", func(): show_toast_banner(sim.modify_junction_approach_lanes(rid, -1, true)); _populate_drawer()],
+		["+ Back Pocket (%d)" % ab, func(): show_toast_banner(sim.modify_junction_approach_lanes(rid, 1, false)); _populate_drawer()],
+		["− Back Pocket", func(): show_toast_banner(sim.modify_junction_approach_lanes(rid, -1, false)); _populate_drawer()],
+	]:
+		var jb := Button.new()
+		jb.focus_mode = Control.FOCUS_NONE
+		jb.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		jb.custom_minimum_size = Vector2(0, 36)
+		jb.text = String(jact[0])
+		jb.pressed.connect(jact[1] as Callable)
+		junc_grid.add_child(jb)
+
 	var cut_n: int = sim.count_routes_cut_by_closing(rid)
 	var close_lbl: String = "Reopen street ($0)" if bool(r["closed"]) else (
 		("Close street ($3,200 · cuts %d routes!)" % cut_n) if cut_n > 0 else "Close street into pedestrian park ($3,200)"
 	)
 
 	for act in [
-		["Turn Pocket: %s (tap to cycle, $600/lvl)" % GameCatalog.POCKET_LABELS[pk_lvl], func(): show_toast_banner(sim.cycle_road_pocket(rid)); _populate_drawer(), false],
+		["Pocket Length: %s (tap to cycle)" % pk_names[pk_sz], func(): show_toast_banner(sim.cycle_road_pocket_size(rid)); _populate_drawer(), false],
 		["Fwd Turn Arrows: %s" % SimEngine.format_turn_mask(tmf), func(): show_toast_banner(sim.cycle_road_turn_mask(rid, true)); _populate_drawer(), false],
 		["Back Turn Arrows: %s" % SimEngine.format_turn_mask(tmb), func(): show_toast_banner(sim.cycle_road_turn_mask(rid, false)); _populate_drawer(), false],
 		["⇄ Cycle Two-way / One-way ($0)", func(): show_toast_banner(sim.cycle_road_one_way(rid)); _populate_drawer(), false],
@@ -2138,7 +2172,7 @@ func _build_authentic_road_panel() -> void:
 		if bool(act[2]):
 			b.theme_type_variation = &"PrimaryButton"
 		b.focus_mode = Control.FOCUS_NONE
-		b.custom_minimum_size = Vector2(0, 40)
+		b.custom_minimum_size = Vector2(0, 38)
 		b.text = String(act[0])
 		b.pressed.connect(act[1] as Callable)
 		_inspector_body.add_child(b)

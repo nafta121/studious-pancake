@@ -274,9 +274,14 @@ func _prepare_smoke_test() -> void:
 		sim.remove_traffic_lights(test_jid)
 	if not sim.roads.is_empty():
 		var test_rid := String(sim.roads[0]["id"])
+		sim.modify_junction_approach_lanes(test_rid, true, 1)
+		sim.cycle_road_pocket_size(test_rid)
+		sim.modify_junction_approach_lanes(test_rid, true, -1)
+		sim.road_map[test_rid]["pocketSize"] = 1
 		sim.cycle_road_pocket(test_rid)
 		sim.cycle_road_turn_mask(test_rid, true)
 		sim.road_map[test_rid]["pocketLevel"] = 0
+		sim.road_map[test_rid]["approachLanesForward"] = int(sim.road_map[test_rid]["lanesForward"])
 		sim.road_map[test_rid]["turnMaskForward"] = 7
 	if not sim.routes.is_empty():
 		var test_rtid := String(sim.routes[0]["id"])
@@ -327,6 +332,10 @@ func _step_smoke() -> void:
 	elif _smoke_frame == 16:
 		_save_shot_sync("godot_android_inspector_madiun.png")
 		hud._fac_swap_route_id = ""
+		if not sim.roads.is_empty():
+			map_view.selected_road_id = String(sim.roads[0]["id"])
+			hud.open_drawer("road")
+			map_view.selected_road_id = ""
 		hud.open_drawer("alerts")
 		hud.open_drawer("settings")
 		hud.open_drawer("routes")
@@ -363,7 +372,7 @@ func _step_smoke() -> void:
 	elif _smoke_frame == 40:
 		_save_shot_sync("godot_android_pacitan_harbour.png")
 		# Close-up showcase on Kota Madiun (1280x720): swept Bezier junctions, 2-lane & 1-lane roundabouts,
-		# Kali Madiun bridges, lane markings/arrows, yield shark-teeth, corner signals & rule_hints shader!
+		# Kali Madiun bridges, flared turn pockets, hatched median islands, lane markings/arrows & rule_hints!
 		sim.load_map("kota_madiun", false)
 		sim.cash = 65000
 		for ri2 in [1, 2]:
@@ -372,8 +381,15 @@ func _step_smoke() -> void:
 		sim._rebuild_lookups()
 		if sim.junction_map.has("km_sleko"):
 			sim.junction_map["km_sleko"]["control"] = "roundabout2"
-		if sim.road_map.has("km_r_pahlawan"):
-			sim.road_map["km_r_pahlawan"]["pocketLevel"] = 1
+		if sim.road_map.has("km_e10"):
+			sim.road_map["km_e10"]["approachLanesForward"] = 3
+			sim.road_map["km_e10"]["pocketSize"] = 1
+		if sim.road_map.has("km_e12"):
+			sim.road_map["km_e12"]["approachLanesBackward"] = 3
+			sim.road_map["km_e12"]["pocketSize"] = 1
+		if sim.road_map.has("km_e13"):
+			sim.road_map["km_e13"]["approachLanesForward"] = 2
+			sim.road_map["km_e13"]["pocketSize"] = 1
 		sim._refresh_network_geometry()
 		sim.recompute_all_routes()
 		if sim.facilities.size() >= 7:
@@ -394,6 +410,12 @@ func _step_smoke() -> void:
 	elif _smoke_frame == 48:
 		_save_shot_sync("godot_android_junction_roundabout_closeup.png")
 		map_view.selected_junction_id = ""
+		map_view.selected_road_id = "km_e10"
+		hud.open_drawer("road")
+		camera.focus_map({"x": -115.0, "y": 82.0, "zoom": 2.05}, sim.map_def["boundsWorld"])
+	elif _smoke_frame == 54:
+		_save_shot_sync("godot_android_street_editor_lanes.png")
+		map_view.selected_road_id = ""
 		DisplayServer.window_set_size(Vector2i(480, 960))
 		get_tree().root.size = Vector2i(480, 960)
 		_on_map_selected("kota_madiun")
@@ -401,12 +423,12 @@ func _step_smoke() -> void:
 			sim._step_fixed(SimEngine.SIM_DT)
 		hud._layout_responsive()
 		hud.open_drawer("maps")
-	elif _smoke_frame == 58:
+	elif _smoke_frame == 64:
 		_save_shot_sync("godot_android_portrait_kota_madiun.png")
 		hud.close_drawer()
 		if sfx != null:
 			sfx.shutdown()
-	elif _smoke_frame == 60:
+	elif _smoke_frame == 66:
 		print("SMOKE_TEST_OK goods=%d maps=%d details=%s" % [
 			GameCatalog.GOODS.size(), _smoke_summary.size(), "; ".join(_smoke_summary)
 		])

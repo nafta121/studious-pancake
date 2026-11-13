@@ -4,7 +4,7 @@ Seluruh perubahan penting pada rilis APK Android (`id.madiun.incrementaltraffic`
 
 ## 🔐 Jaminan Kontinuitas Sertifikat Penandatanganan APK (*Signing Certificate Continuity*)
 
-Agar pengguna Android dapat melakukan **pembaruan langsung (*in-place update* / `adb install -r`)** tanpa perlu menghapus instalasi lama atau kehilangan data simpanan permainan (`user://save_<map_id>.json`), seluruh rilis mulai `v1.1.0-madiun`, `v1.2.0-madiun`, hingga `v1.3.0-madiun` dan rilis-rilis berikutnya dikunci menggunakan *keystore* rilis tetap (`signing/madiun_godot_release.keystore`) dengan validasi otomatis pada [`scripts/build_android_apk.sh`](scripts/build_android_apk.sh):
+Agar pengguna Android dapat melakukan **pembaruan langsung (*in-place update* / `adb install -r`)** tanpa perlu menghapus instalasi lama atau kehilangan data simpanan permainan (`user://save_<map_id>.json`), seluruh rilis mulai `v1.1.0-madiun`, `v1.2.0-madiun`, `v1.3.0-madiun`, hingga `v1.4.0-madiun` dan rilis-rilis berikutnya dikunci menggunakan *keystore* rilis tetap (`signing/madiun_godot_release.keystore`) dengan validasi otomatis pada [`scripts/build_android_apk.sh`](scripts/build_android_apk.sh):
 
 | Atribut Sertifikat | Nilai Terkunci |
 | :--- | :--- |
@@ -16,7 +16,29 @@ Agar pengguna Android dapat melakukan **pembaruan langsung (*in-place update* / 
 | **Certificate SHA-1 Digest** | `4a10248317724b7f363d92c9874c5c521ef98808` |
 | **Masa Berlaku** | `2026-11-13` s/d `2054-03-31` |
 
-> **Catatan Pembaruan**: Jika Anda sebelumnya memasang `v1.1.0-madiun` atau `v1.2.0-madiun`, Anda dapat langsung mengunduh dan memasang `v1.3.0-madiun` di atasnya tanpa *uninstall*.
+> **Catatan Pembaruan**: Jika Anda sebelumnya memasang `v1.1.0-madiun`, `v1.2.0-madiun`, atau `v1.3.0-madiun`, Anda dapat langsung mengunduh dan memasang `v1.4.0-madiun` di atasnya tanpa *uninstall*.
+
+---
+
+## [`v1.4.0-madiun`] — `versionCode: 140`
+
+- **Berkas APK**: [`incremental-traffic-madiun-android.apk`](releases/incremental-traffic-madiun-android.apk) (`28.087.908 byte` / `26,8 MB`, `arm64-v8a`, Android 7.0+ `minSdk: 24`, `200` berkas terpaket)
+- **APK SHA-256**: `8a9c1dcb7522dcd38e89a7cbdc1b78a1e54c4a9c1c6eb63d0246742b1eab042e`
+- **Certificate Serial / SHA-256**: `5071a11bb51cc4dc` / `7bae8ba2a722a2168c38f3faaf0a3d61df57b32700cefdf2041fd59fbf4981ce` (identik dengan `v1.1.0-madiun` – `v1.3.0-madiun`)
+
+### 🛣️ Audit REA & Penyelarasan Penuh `Road Shape`, `Road Size` & `Lanes` Asli *Incremental Traffic* (`v1.4.0`)
+1. **Proporsi Eksak `Road Size` & `Lane Width` (`1.68×` Rasio Lebar Truk) (`road_geom.gd`, `map_view_25d.gd`)**:
+   - Hasil audit REA atas `const.gd`, `road_bed.gd`, `lane_markings.gd`, `truck_view.gd`, dan dekompilasi Ghidra `SimCore::set_lane` (`ram:0x180014c40`) menyelaraskan seluruh skala geometri jalan (`UNIT_SCALE = 0.20`): `LANE_WIDTH = 6.72` (`33.6 × 0.20`, rasio presisi `1.68×` terhadap lebar truk `4.0` = `20.0 × 0.20`), `LANE_SEPARATION = 3.84` (`19.2 × 0.20`), `LANE_SPACING = 6.00` (`30.0 × 0.20`), `MAX_LANES = 4`, `SIDEWALK = 1.76`, `CURB = 0.40`, `SHADOW_BAND = 1.20`, `LINE_WIDTH = 0.44`, dan `STOP_LINE_WIDTH = 0.90`.
+2. **Arsitektur Polilin Eksplisit Per-Lajur (`lanesFwd` / `lanesBwd`) & Pelebaran Kantong Belok *Cubic Hermite* (`ramp`) (`road_geom.gd`, `sim_engine.gd`)**:
+   - Setiap lajur arah maju dan balik (`1–4` lajur sepanjang ruas jalan + `1–4` lajur pendekatan simpang `approachLanesForward` / `approachLanesBackward`) kini dibangun sebagai polilin eksplisit per-lajur seperti `SimCore::set_lane`, lengkap dengan pelebaran kantong belok (*turn pocket flare*) halus `ramp(a, b, x) = t²(3 - 2t)` serta 3 pilihan panjang kantong asli (`Short = 26.0`, `Medium = 52.0`, `Long = 82.0`, setara `[130, 260, 410] px` asli).
+3. **Bentuk Jalan `RoadBed` 3-Cincin Konsentris & `RoadSurface.plaza_polygon` Asimetris Bebas Celah (`road_geom.gd`, `map_view_25d.gd`)**:
+   - Mengimplementasikan 3 lapisan konsentris `RoadBed` asli (`Contact Shadow Color("#363D55", 0.08)` → `Sidewalk #E2DED2` → `Curb #A9A59B`) di sekeliling polilin tiap lajur dan poligon simpang, menyinkronkan sudut tenggorokan simpang `[left_corner, right_corner]` langsung dari titik ujung lajur aktual (menjamin `0` celah antara lengan jalan dan simpang di segala sudut kurva OSRM), *fillet* Bezier kuadratik 8-segmen untuk belokan `< 145°`, busur Bezier kubik `bend(..., arc=true)` untuk sambungan lurus/siku luar `>= 145°`, serta pulau bundaran rumput `#C9D8A6` (`COL_GRASS`) bertepi trotoar `#E2DED2` dan kereb `#A9A59B`.
+4. **Marka Lajur Asli `LaneMarkings` & Pulau Median Berarsir 45° (`map_view_25d.gd`)**:
+   - Garis tengah tunggal `#F2F0E5` putus-putus (`DASH = 3.20`, `GAP = 2.80`) di tengah ruas jalan dua arah yang berubah utuh menjelang simpang (`CENTER_SOLID_DIST = 10.0`), membelah menjadi pulau median berarsir diagonal 45° (`_add_hatched_median_island`) khusus pada zona `medianZones`, pembatas antarlajur searah yang dihitung di titik tengah pasangan lajur bertetangga (hanya muncul setelah kantong belok mekar `>= 0.82 × LANE_SPACING`), serta panah belok per lajur yang hanya digambar ketika lajur pendekatan `> 1` atau memiliki masker belok khusus (`!= 7`).
+5. **Integrasi Langsung Shader Tanah Asli (`city_ground.gdshaderinc`, `city_ground.gdshader`, `road_verge.gdshader`)**:
+   - Mengintegrasikan langsung shader tanah prosedural *Incremental Traffic* (padang rumput/pasir/butir halus berbasis `FastNoiseLite` *seamless* `128×128`) pada kanvas daratan dengan peredaman otomatis saat mode malam/gelap dan preset hemat baterai.
+6. **Panel Inspektur Jalan `StreetEditor` Autentik (`android_hud.gd`, `sim_engine.gd`)**:
+   - Memisahkan kontrol **Lanes along the road (`1–4` per arah)**, **Lanes at junction / Turn pockets (`$1,125` per lajur ekstra di simpang, pengembalian dana `50%`)**, dan **Pocket Length (`Short / Medium / Long`)**, dengan seluruh geometri jalan tetap dikompilasi ke dalam **1 *draw batch* statis `TriBatch2D`** untuk performa stabil **60–120 FPS** di Android.
 
 ---
 

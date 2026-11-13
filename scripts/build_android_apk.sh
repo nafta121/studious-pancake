@@ -7,11 +7,11 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 OUT_APK="${ROOT}/releases/incremental-traffic-madiun-android.apk"
 
 export JAVA_HOME="${JAVA_HOME:-/home/antigravity/.local/share/rea/jdk-21}"
-export ANDROID_HOME="${ANDROID_HOME:-/tmp/android-sdk}"
+export ANDROID_HOME="${ANDROID_HOME:-/home/antigravity/.local/share/android-sdk}"
 export ANDROID_SDK_ROOT="${ANDROID_HOME}"
 export PATH="${JAVA_HOME}/bin:${ANDROID_HOME}/build-tools/34.0.0:${ANDROID_HOME}/cmdline-tools/latest/bin:${PATH}"
 
-GODOT_BIN="${GODOT_BIN:-/tmp/godot472/Godot_v4.7.2-stable_linux.x86_64}"
+GODOT_BIN="${GODOT_BIN:-/home/antigravity/.local/share/godot472/Godot_v4.7.2-stable_linux.x86_64}"
 if ! command -v "$GODOT_BIN" >/dev/null 2>&1 && [[ ! -x "$GODOT_BIN" ]]; then
   GODOT_BIN="$(command -v godot)"
 fi
