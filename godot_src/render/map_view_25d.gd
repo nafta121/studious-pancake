@@ -262,67 +262,8 @@ func _rebuild_static_batches() -> void:
 		_terrain_batch.add_dashed_polyline(rpts, 6.2, tie_col, 2.0, 4.8, 0.0)
 		_terrain_batch.add_polyline(rpts, 2.0, rail_col, false, false)
 
-	# 5. Roads (#3C3F4A asphalt, #A9A59B curbs, #F2F0E5 crisp lane markings)
-	for r in sim.roads:
-		var r_unl: bool = sim.unlocked_regions.has(int(r["regionIndex"]))
-		var pts: PackedVector2Array = r["pts"]
-		var lanes_total: int = int(r["lanesForward"]) + int(r["lanesBackward"])
-		if int(r["oneWay"]) != 0:
-			lanes_total = maxi(int(r["lanesForward"]), int(r["lanesBackward"]))
-		var width: float = float(lanes_total) * 5.2 + 3.8
-
-		if not bool(r["isBuilt"]):
-			if r_unl:
-				_road_batch.add_dashed_polyline(pts, width * 0.74, Color(0.29, 0.50, 0.79, 0.45), 9.0, 7.0)
-			continue
-
-		var sidewalk_c := Color("2A2E38") if is_dark else COL_SIDEWALK
-		var curb_c := Color("181B22") if is_dark else COL_CURB
-		var asphalt := Color("2B2F3A") if is_dark else COL_ROAD
-		if not r_unl:
-			asphalt = asphalt.lerp(COL_BG, 0.52)
-			curb_c.a = 0.35
-			sidewalk_c.a = 0.25
-
-		if bool(r["isBridge"]):
-			_road_batch.add_polyline(pts, width + 6.8, Color("C9BFA9") if not is_dark else Color("49505C"), false, false)
-			_road_batch.add_polyline(pts, width + 4.8, Color("5A5E6B"), false, false)
-		else:
-			_road_batch.add_polyline(pts, width + 4.6, sidewalk_c, false, true)
-		_road_batch.add_polyline(pts, width + 2.0, curb_c, false, true)
-		_road_batch.add_polyline(pts, width, asphalt, false, true)
-
-		if bool(r["closed"]):
-			_road_batch.add_dashed_polyline(pts, width * 0.65, COL_TREE_A, 7.0, 5.0)
-			continue
-
-		if r_unl:
-			if int(r["oneWay"]) == 0:
-				var mark_col := Color(COL_LANE_MARK, 0.85 if not is_dark else 0.55)
-				_road_batch.add_dashed_polyline(pts, 1.2, mark_col, 7.0, 7.5, 0.0)
-			else:
-				_add_one_way_chevrons(pts, int(r["oneWay"]) == 1)
-
-	# 6. Junction Geometry (Asphalt pads, Roundabouts with green islands, Yield triangles)
-	for j in sim.junctions:
-		var j_unl: bool = sim.unlocked_regions.has(int(j["regionIndex"]))
-		var jp: Vector2 = j["pos"]
-		var ctrl := String(j["control"])
-		var pad_col := (Color("2B2F3A") if is_dark else COL_ROAD) if j_unl else COL_ROAD.lerp(COL_BG, 0.52)
-		if ctrl == "roundabout" or ctrl == "roundabout2":
-			var outer_r: float = 20.0 if ctrl == "roundabout2" else 15.5
-			var island_r: float = 6.8
-			_road_batch.add_circle(jp, outer_r + 2.2, COL_CURB, 22)
-			_road_batch.add_circle(jp, outer_r, pad_col, 22)
-			if ctrl == "roundabout2":
-				_road_batch.add_ring(jp, 12.4, 13.5, Color(COL_LANE_MARK, 0.78), 20)
-			_road_batch.add_circle(jp, island_r + 1.5, COL_SIDEWALK, 18)
-			_road_batch.add_circle(jp, island_r, COL_TREE_A, 18)
-		else:
-			_road_batch.add_circle(jp, 7.8, pad_col, 14)
-			if ctrl == "yield" and j_unl:
-				_road_batch.add_tri(jp + Vector2(0, -6.4), jp + Vector2(5.8, 4.5), jp + Vector2(-5.8, 4.5), Color("C8323A"))
-				_road_batch.add_tri(jp + Vector2(0, -3.5), jp + Vector2(3.2, 2.8), jp + Vector2(-3.2, 2.8), Color.WHITE)
+	# 5 & 6. Multi-Pass Authentic Incremental Traffic RoadBed, Swept Junctions, Roundabouts, Update 1.9 Bridges & RoadPaint
+	_build_roads_and_junctions_batches(is_dark)
 
 	# 7. Town Houses & Commercial Blocks (authentic muted slate, terracotta & sand roofs from game_town-wide.webp)
 	var skip_minor_houses: bool = perf_preset == "battery"
@@ -431,18 +372,563 @@ func _rebuild_static_batches() -> void:
 	_extrude_node.queue_redraw()
 	_cloud_node.queue_redraw()
 
-func _add_one_way_chevrons(pts: PackedVector2Array, forward: bool) -> void:
-	if pts.size() < 2:
+func _build_roads_and_junctions_batches(is_dark: bool) -> void:
+	var lht: bool = sim.left_hand_traffic
+	var sidewalk_base := Color("2A2E38") if is_dark else COL_SIDEWALK
+	var curb_base := Color("181B22") if is_dark else COL_CURB
+	var asphalt_base := Color("2B2F3A") if is_dark else COL_ROAD
+	var mark_col := Color(COL_LANE_MARK, 0.90 if not is_dark else 0.62)
+	var mark_soft := Color(COL_LANE_MARK, 0.76 if not is_dark else 0.50)
+
+	# Pass 5.0: Unbuilt Road Offers (blueprint corridors) + Bridge/Overpass Water & Ground Drop Shadows
+	var shadow_bridge := Color(0.12, 0.16, 0.24, 0.28 if not is_dark else 0.42)
+	for r in sim.roads:
+		var r_unl: bool = sim.unlocked_regions.has(int(r["regionIndex"]))
+		var pts: PackedVector2Array = r["pts"]
+		var cum: PackedFloat32Array = r["cum_len"]
+		var rw: float = float(r.get("widthPx", RoadGeom.get_road_width(r)))
+
+		if not bool(r["isBuilt"]):
+			if r_unl:
+				var bp_fill := Color(0.27, 0.50, 0.82, 0.16)
+				var bp_dash := Color(0.27, 0.50, 0.82, 0.55)
+				_road_batch.add_smooth_strip(pts, rw * 0.82, bp_fill, false, true)
+				_road_batch.add_dashed_polyline(pts, 1.3, bp_dash, 7.5, 6.0, -rw * 0.36)
+				_road_batch.add_dashed_polyline(pts, 1.3, bp_dash, 7.5, 6.0, rw * 0.36)
+			continue
+
+		for sp in r.get("bridgeSpans", []):
+			var b_pts: PackedVector2Array = RoadGeom.slice_polyline(pts, cum, float(sp[0]), float(sp[1]))
+			if b_pts.size() >= 2:
+				var sh_pts := PackedVector2Array()
+				sh_pts.resize(b_pts.size())
+				for i in range(b_pts.size()):
+					sh_pts[i] = b_pts[i] + Vector2(3.6, 4.6)
+				_road_batch.add_smooth_strip(sh_pts, rw + 6.4, shadow_bridge, false, false)
+
+		for osp in r.get("overpassSpans", []):
+			var o_pts: PackedVector2Array = RoadGeom.slice_polyline(pts, cum, float(osp[0]), float(osp[1]))
+			if o_pts.size() >= 2:
+				var osh_pts := PackedVector2Array()
+				osh_pts.resize(o_pts.size())
+				for i in range(o_pts.size()):
+					osh_pts[i] = o_pts[i] + Vector2(4.4, 5.6)
+				_road_batch.add_smooth_strip(osh_pts, rw + 7.2, shadow_bridge, false, false)
+
+	# Pass 5.1a: Continuous Sidewalk Layer (roads + swept junction fillets + roundabout outer rings)
+	var bg_mute: Color = Color("161920") if is_dark else COL_BG
+	for r in sim.roads:
+		if not bool(r["isBuilt"]):
+			continue
+		var r_unl: bool = sim.unlocked_regions.has(int(r["regionIndex"]))
+		var sw_c: Color = sidewalk_base if r_unl else sidewalk_base.lerp(bg_mute, 0.62)
+		var rw: float = float(r.get("widthPx", RoadGeom.get_road_width(r)))
+		var rlen: float = float(r["lengthPx"])
+		var bed_s0: float = maxf(0.0, float(r.get("trimStart", 0.0)) - 1.8)
+		var bed_s1: float = minf(rlen, rlen - float(r.get("trimEnd", 0.0)) + 1.8)
+		if bed_s1 - bed_s0 >= 1.0:
+			var bed_pts: PackedVector2Array = RoadGeom.slice_polyline(r["pts"], r["cum_len"], bed_s0, bed_s1)
+			_road_batch.add_smooth_strip(bed_pts, rw + 4.8, sw_c, false, false)
+
+	for j in sim.junctions:
+		var j_unl: bool = sim.unlocked_regions.has(int(j["regionIndex"]))
+		var sw_c: Color = sidewalk_base if j_unl else sidewalk_base.lerp(bg_mute, 0.62)
+		var jp: Vector2 = j["pos"]
+		var geom: Dictionary = j.get("geom", {})
+		var gkind := String(geom.get("kind", "empty"))
+		if gkind == "roundabout" or gkind == "roundabout2":
+			var r_out: float = float(geom["r_outer"])
+			_road_batch.add_circle(jp, r_out + 2.8, sw_c, 32)
+			for a in geom["arms"]:
+				if a.has("flare_sidewalk"):
+					_road_batch.add_polygon_safe(a["flare_sidewalk"], sw_c)
+		elif gkind == "standard" and geom.has("swept_sidewalk"):
+			_road_batch.add_polygon_safe(geom["swept_sidewalk"], sw_c)
+		elif gkind == "culdesac":
+			_road_batch.add_circle(jp, float(geom.get("radius", 5.0)) + 2.5, sw_c, 18)
+
+	# Pass 5.1b: Continuous Curb Layer (roads + swept junction curbs + roundabout outer curbs)
+	for r in sim.roads:
+		if not bool(r["isBuilt"]):
+			continue
+		var r_unl: bool = sim.unlocked_regions.has(int(r["regionIndex"]))
+		var cb_c: Color = curb_base if r_unl else curb_base.lerp(bg_mute, 0.58)
+		var rw: float = float(r.get("widthPx", RoadGeom.get_road_width(r)))
+		var rlen: float = float(r["lengthPx"])
+		var bed_s0: float = maxf(0.0, float(r.get("trimStart", 0.0)) - 1.8)
+		var bed_s1: float = minf(rlen, rlen - float(r.get("trimEnd", 0.0)) + 1.8)
+		if bed_s1 - bed_s0 >= 1.0:
+			var bed_pts: PackedVector2Array = RoadGeom.slice_polyline(r["pts"], r["cum_len"], bed_s0, bed_s1)
+			_road_batch.add_smooth_strip(bed_pts, rw + 2.1, cb_c, false, false)
+
+	for j in sim.junctions:
+		var j_unl: bool = sim.unlocked_regions.has(int(j["regionIndex"]))
+		var cb_c: Color = curb_base if j_unl else curb_base.lerp(bg_mute, 0.58)
+		var jp: Vector2 = j["pos"]
+		var geom: Dictionary = j.get("geom", {})
+		var gkind := String(geom.get("kind", "empty"))
+		if gkind == "roundabout" or gkind == "roundabout2":
+			var r_out: float = float(geom["r_outer"])
+			_road_batch.add_circle(jp, r_out + 1.2, cb_c, 32)
+			for a in geom["arms"]:
+				if a.has("flare_curb"):
+					_road_batch.add_polygon_safe(a["flare_curb"], cb_c)
+		elif gkind == "standard" and geom.has("swept_curb"):
+			_road_batch.add_polygon_safe(geom["swept_curb"], cb_c)
+		elif gkind == "culdesac":
+			_road_batch.add_circle(jp, float(geom.get("radius", 5.0)) + 1.1, cb_c, 18)
+
+	# Pass 5.2: Unified Monolithic Asphalt Surface (zero curb seams across intersections or roundabouts!)
+	for r in sim.roads:
+		if not bool(r["isBuilt"]):
+			continue
+		var r_unl: bool = sim.unlocked_regions.has(int(r["regionIndex"]))
+		var asph: Color = asphalt_base if r_unl else asphalt_base.lerp(bg_mute, 0.52)
+		var rw: float = float(r.get("widthPx", RoadGeom.get_road_width(r)))
+		var rlen: float = float(r["lengthPx"])
+		var bed_s0: float = maxf(0.0, float(r.get("trimStart", 0.0)) - 1.8)
+		var bed_s1: float = minf(rlen, rlen - float(r.get("trimEnd", 0.0)) + 1.8)
+		if bed_s1 - bed_s0 >= 1.0:
+			var bed_pts: PackedVector2Array = RoadGeom.slice_polyline(r["pts"], r["cum_len"], bed_s0, bed_s1)
+			_road_batch.add_smooth_strip(bed_pts, rw, asph, false, false)
+
+	for j in sim.junctions:
+		var j_unl: bool = sim.unlocked_regions.has(int(j["regionIndex"]))
+		var asph: Color = asphalt_base if j_unl else asphalt_base.lerp(bg_mute, 0.52)
+		var jp: Vector2 = j["pos"]
+		var geom: Dictionary = j.get("geom", {})
+		var gkind := String(geom.get("kind", "empty"))
+		if gkind == "roundabout" or gkind == "roundabout2":
+			var r_out: float = float(geom["r_outer"])
+			_road_batch.add_circle(jp, r_out, asph, 34)
+			for a in geom["arms"]:
+				if a.has("flare_asphalt"):
+					_road_batch.add_polygon_safe(a["flare_asphalt"], asph)
+		elif gkind == "standard" and geom.has("swept_asphalt"):
+			_road_batch.add_polygon_safe(geom["swept_asphalt"], asph)
+		elif gkind == "culdesac":
+			_road_batch.add_circle(jp, float(geom.get("radius", 5.0)), asph, 18)
+
+	# Pass 5.3: Roundabout Central Landscaped Islands & Approach Splitter Islands
+	for j in sim.junctions:
+		var geom: Dictionary = j.get("geom", {})
+		var gkind := String(geom.get("kind", "empty"))
+		if gkind != "roundabout" and gkind != "roundabout2":
+			continue
+		var j_unl: bool = sim.unlocked_regions.has(int(j["regionIndex"]))
+		var jp: Vector2 = j["pos"]
+		var r_isl: float = float(geom["r_island"])
+		var r_out: float = float(geom["r_outer"])
+
+		var apron_c := Color("EAE6DA") if not is_dark else Color("494F5C")
+		var isl_curb := Color("ACA79B") if not is_dark else Color("2E333E")
+		var isl_grass := Color("6E9953") if not is_dark else Color("33492D")
+		if not j_unl:
+			apron_c = apron_c.lerp(COL_BG, 0.55)
+			isl_curb = isl_curb.lerp(COL_BG, 0.55)
+			isl_grass = isl_grass.lerp(COL_BG, 0.55)
+
+		# Crisp outer paved truck-apron + stone curb + landscaped green island
+		_road_batch.add_circle(jp, r_isl + 1.5, apron_c, 28)
+		_road_batch.add_circle(jp, r_isl + 0.4, isl_curb, 26)
+		_road_batch.add_circle(jp, maxf(2.4, r_isl - 0.8), isl_grass, 26)
+
+		if j_unl:
+			if j.get("landmark", null) != null and r_isl >= 5.6:
+				# Subtle Tugu / Bundaran monument plinth at landmark roundabouts (e.g. Bundaran Taman / Serayu)
+				_road_batch.add_rect_rot(jp + Vector2(0.8, 1.0), 4.8, 4.8, PI * 0.25, COL_SHADOW)
+				_road_batch.add_rect_rot(jp, 4.4, 4.4, PI * 0.25, Color("E8E3D6") if not is_dark else Color("6A7080"))
+				_road_batch.add_circle(jp, 1.4, Color("D97A3E"), 10)
+			elif r_isl >= 5.2:
+				_road_batch.add_circle(jp + Vector2(-1.3, -0.9), 2.1, COL_TREE_B if not is_dark else COL_TREE_B.darkened(0.45), 10)
+				_road_batch.add_circle(jp + Vector2(1.5, 1.1), 1.7, COL_TREE_AUTUMN if not is_dark else COL_TREE_AUTUMN.darkened(0.45), 10)
+
+			# Triangular splitter islands on two-way roundabout arms
+			for a in geom["arms"]:
+				if int(a["one_way"]) == 0 and not bool(a["closed"]) and float(a["rlen"]) >= r_out + 24.0:
+					var u_out: Vector2 = a["throat_out_dir"]
+					var rn := Vector2(-u_out.y, u_out.x)
+					var p_inner: Vector2 = jp + u_out * (r_out + 1.4)
+					var p_tip: Vector2 = jp + u_out * (r_out + 8.6)
+					var sp_hw: float = clampf(float(a["hw"]) * 0.22, 1.2, 2.3)
+					_road_batch.add_tri(p_tip, p_inner - rn * (sp_hw + 0.5), p_inner + rn * (sp_hw + 0.5), apron_c)
+					_road_batch.add_tri(p_tip - u_out * 1.1, p_inner - rn * sp_hw + u_out * 0.5, p_inner + rn * sp_hw + u_out * 0.5, isl_curb)
+
+	# Pass 5.4: Update 1.9 River-Crossing Bridges (strictly over river spans!) & Grade-Separated Overpasses
+	for r in sim.roads:
+		if not bool(r["isBuilt"]):
+			continue
+		var r_unl: bool = sim.unlocked_regions.has(int(r["regionIndex"]))
+		var pts: PackedVector2Array = r["pts"]
+		var cum: PackedFloat32Array = r["cum_len"]
+		var rw: float = float(r.get("widthPx", RoadGeom.get_road_width(r)))
+		var asph: Color = asphalt_base if r_unl else asphalt_base.lerp(COL_BG, 0.52)
+
+		var b_spans: Array = r.get("bridgeSpans", [])
+		if not b_spans.is_empty():
+			var pier_dark := Color("948F83") if not is_dark else Color("323742")
+			var pier_cap := Color("C8C2B4") if not is_dark else Color("505664")
+			var deck_walk := Color("DFDBD0") if not is_dark else Color("434956")
+			var parapet_top := Color("F5F2EA") if not is_dark else Color("6A7282")
+			var parapet_in := Color(0.14, 0.15, 0.19, 0.52)
+			if not r_unl:
+				deck_walk = deck_walk.lerp(COL_BG, 0.5)
+				parapet_top = parapet_top.lerp(COL_BG, 0.5)
+				pier_cap = pier_cap.lerp(COL_BG, 0.5)
+
+			for sp in b_spans:
+				var s0: float = float(sp[0])
+				var s1: float = float(sp[1])
+				var span_len: float = s1 - s0
+				var b_pts: PackedVector2Array = RoadGeom.slice_polyline(pts, cum, s0, s1)
+				if b_pts.size() < 2:
+					continue
+
+				# Bank abutment piers at s0 & s1 + intermediate river piers on wide Bengawan/Kali crossings
+				var pier_s_list: Array[float] = [s0, s1]
+				if span_len >= 52.0:
+					var n_mid: int = int(floor(span_len / 44.0))
+					for mi in range(1, n_mid + 1):
+						pier_s_list.append(lerpf(s0, s1, float(mi) / float(n_mid + 1)))
+				for ps in pier_s_list:
+					var pr_raw: Dictionary = RoadGeom.sample_polyline_raw(pts, cum, ps)
+					var p_ang: float = atan2((pr_raw["dir"] as Vector2).y, (pr_raw["dir"] as Vector2).x)
+					_road_batch.add_rect_rot(pr_raw["pos"], 4.8, rw + 8.6, p_ang, pier_dark)
+					_road_batch.add_rect_rot(pr_raw["pos"], 3.4, rw + 7.4, p_ang, pier_cap)
+
+				# Bridge concrete sidewalk deck + roadways + crisp left/right raised stone parapet rails
+				_road_batch.add_smooth_strip(b_pts, rw + 5.8, deck_walk, false, false)
+				_road_batch.add_smooth_strip(b_pts, rw, asph, false, false)
+				var rail_off: float = rw * 0.5 + 2.2
+				var inner_off: float = rw * 0.5 + 1.15
+				_road_batch.add_smooth_strip(b_pts, 1.55, parapet_top, false, false, -rail_off)
+				_road_batch.add_smooth_strip(b_pts, 1.55, parapet_top, false, false, rail_off)
+				_road_batch.add_smooth_strip(b_pts, 0.70, parapet_in, false, false, -inner_off)
+				_road_batch.add_smooth_strip(b_pts, 0.70, parapet_in, false, false, inner_off)
+
+		var o_spans: Array = r.get("overpassSpans", [])
+		if not o_spans.is_empty():
+			var ov_deck := Color("CFD4DC") if not is_dark else Color("49505E")
+			var ov_rail := Color("ECEFF4") if not is_dark else Color("6F788A")
+			for osp in o_spans:
+				var os0: float = float(osp[0])
+				var os1: float = float(osp[1])
+				var o_pts: PackedVector2Array = RoadGeom.slice_polyline(pts, cum, os0, os1)
+				if o_pts.size() < 2:
+					continue
+				_road_batch.add_smooth_strip(o_pts, rw + 5.0, ov_deck, false, false)
+				_road_batch.add_smooth_strip(o_pts, rw, asph, false, false)
+				var or_off: float = rw * 0.5 + 2.0
+				_road_batch.add_smooth_strip(o_pts, 1.4, ov_rail, false, false, -or_off)
+				_road_batch.add_smooth_strip(o_pts, 1.4, ov_rail, false, false, or_off)
+
+	# Pass 5.5: Strictly Trimmed RoadPaint Markings, Closed-Street Plazas, Stop/Yield Bars & Turn Arrows
+	for r in sim.roads:
+		if not bool(r["isBuilt"]) or not sim.unlocked_regions.has(int(r["regionIndex"])):
+			continue
+		var pts: PackedVector2Array = r["pts"]
+		var cum: PackedFloat32Array = r["cum_len"]
+		var rlen: float = float(r["lengthPx"])
+		var rw: float = float(r.get("widthPx", RoadGeom.get_road_width(r)))
+		var p_s0: float = float(r.get("trimStart", 0.0)) + 0.6
+		var p_s1: float = rlen - float(r.get("trimEnd", 0.0)) - 0.6
+		if p_s1 - p_s0 < 4.0:
+			continue
+
+		if bool(r["closed"]):
+			# Authentic pedestrianized park street (trimmed cleanly outside junctions!)
+			var c_pts: PackedVector2Array = RoadGeom.slice_polyline(pts, cum, p_s0 + 1.5, p_s1 - 1.5)
+			if c_pts.size() >= 2:
+				var lawn_c := COL_GRASS if not is_dark else COL_GRASS.darkened(0.55)
+				var path_c := COL_SIDEWALK if not is_dark else Color("454B58")
+				_road_batch.add_smooth_strip(c_pts, rw * 0.78, lawn_c, false, false)
+				_road_batch.add_smooth_strip(c_pts, rw * 0.28, path_c, false, false)
+				for end_s in [p_s0 + 1.2, p_s1 - 1.2]:
+					var b_raw: Dictionary = RoadGeom.sample_polyline_raw(pts, cum, end_s)
+					var b_pos: Vector2 = b_raw["pos"]
+					var b_rn: Vector2 = b_raw["right"]
+					for bi in [-1, 0, 1]:
+						var bp: Vector2 = b_pos + b_rn * (float(bi) * rw * 0.28)
+						_road_batch.add_circle(bp, 1.45, Color("C8323A"), 8)
+						_road_batch.add_circle(bp, 0.75, COL_LANE_MARK, 8)
+			continue
+
+		var ow: int = int(r["oneWay"])
+		var lf: int = maxi(1, int(r["lanesForward"]))
+		var lb: int = maxi(1, int(r["lanesBackward"]))
+		var m_pts: PackedVector2Array = RoadGeom.slice_polyline(pts, cum, p_s0, p_s1)
+		if m_pts.size() < 2:
+			continue
+
+		var j_u: Dictionary = sim.junction_map.get(String(r["from"]), {})
+		var j_v: Dictionary = sim.junction_map.get(String(r["to"]), {})
+		var u_multi: bool = ((j_u.get("geom", {}) as Dictionary).get("arms", []) as Array).size() >= 3 or String(j_u.get("control", "")) == "lights"
+		var v_multi: bool = ((j_v.get("geom", {}) as Dictionary).get("arms", []) as Array).size() >= 3 or String(j_v.get("control", "")) == "lights"
+
+		if ow == 0:
+			var tot_l: int = lf + lb
+			var asym_shift: float = float(lf - lb) * 0.5 * RoadGeom.LANE_WIDTH
+			var div_off: float = asym_shift if not lht else -asym_shift
+
+			if String(r["roadClass"]) == "toll" or tot_l >= 4:
+				# Double solid arterial/highway median line + hatched gore chevron near signalized junctions!
+				_road_batch.add_smooth_strip(m_pts, 0.82, mark_col, false, false, div_off - 0.62)
+				_road_batch.add_smooth_strip(m_pts, 0.82, mark_col, false, false, div_off + 0.62)
+				if p_s1 - p_s0 >= 44.0:
+					if String(j_u.get("control", "")) == "lights":
+						_add_hatched_median_gore(pts, cum, p_s0 + 1.0, p_s0 + 15.5, div_off, mark_soft)
+					if String(j_v.get("control", "")) == "lights":
+						_add_hatched_median_gore(pts, cum, p_s1 - 15.5, p_s1 - 1.0, div_off, mark_soft)
+			else:
+				# Two-lane road: solid pre-junction throat centerline + crisp dashed mid-block centerline
+				var solid_u: float = 11.0 if (u_multi and p_s1 - p_s0 >= 30.0) else 0.0
+				var solid_v: float = 11.0 if (v_multi and p_s1 - p_s0 >= 30.0) else 0.0
+				if solid_u > 0.0:
+					var su_pts: PackedVector2Array = RoadGeom.slice_polyline(pts, cum, p_s0, p_s0 + solid_u)
+					_road_batch.add_smooth_strip(su_pts, 1.05, mark_col, false, false, div_off)
+				if solid_v > 0.0:
+					var sv_pts: PackedVector2Array = RoadGeom.slice_polyline(pts, cum, p_s1 - solid_v, p_s1)
+					_road_batch.add_smooth_strip(sv_pts, 1.05, mark_col, false, false, div_off)
+				var mid_pts: PackedVector2Array = RoadGeom.slice_polyline(pts, cum, p_s0 + solid_u + 1.5, p_s1 - solid_v - 1.5)
+				if mid_pts.size() >= 2:
+					_road_batch.add_dashed_polyline(mid_pts, 1.02, mark_soft, 6.2, 6.8, div_off)
+
+			# Same-direction multi-lane dashed dividers (turning solid right before traffic lights!)
+			if lf > 1:
+				var sol_end: float = 10.5 if (v_multi and p_s1 - p_s0 >= 28.0) else 0.0
+				var lf_dash_pts: PackedVector2Array = RoadGeom.slice_polyline(pts, cum, p_s0 + 1.0, p_s1 - sol_end - 1.0)
+				var lf_sol_pts: PackedVector2Array = RoadGeom.slice_polyline(pts, cum, p_s1 - sol_end, p_s1) if sol_end > 0.0 else PackedVector2Array()
+				for k in range(lf - 1):
+					var lat_a: float = RoadGeom.get_lane_lateral_offset(0, float(k), lf, lb, lht)
+					var lat_b: float = RoadGeom.get_lane_lateral_offset(0, float(k + 1), lf, lb, lht)
+					var b_lat: float = 0.5 * (lat_a + lat_b)
+					if lf_dash_pts.size() >= 2:
+						_road_batch.add_dashed_polyline(lf_dash_pts, 0.90, mark_soft, 5.4, 6.4, b_lat)
+					if lf_sol_pts.size() >= 2:
+						_road_batch.add_smooth_strip(lf_sol_pts, 0.95, mark_col, false, false, b_lat)
+
+			if lb > 1:
+				var sol_start: float = 10.5 if (u_multi and p_s1 - p_s0 >= 28.0) else 0.0
+				var lb_dash_pts: PackedVector2Array = RoadGeom.slice_polyline(pts, cum, p_s0 + sol_start + 1.0, p_s1 - 1.0)
+				var lb_sol_pts: PackedVector2Array = RoadGeom.slice_polyline(pts, cum, p_s0, p_s0 + sol_start) if sol_start > 0.0 else PackedVector2Array()
+				for k in range(lb - 1):
+					# Note: backward direction has opposite right_vec, so negate lateral offset relative to forward pts!
+					var lat_a: float = -RoadGeom.get_lane_lateral_offset(0, float(k), lb, lf, lht)
+					var lat_b: float = -RoadGeom.get_lane_lateral_offset(0, float(k + 1), lb, lf, lht)
+					var b_lat: float = 0.5 * (lat_a + lat_b)
+					if lb_dash_pts.size() >= 2:
+						_road_batch.add_dashed_polyline(lb_dash_pts, 0.90, mark_soft, 5.4, 6.4, b_lat)
+					if lb_sol_pts.size() >= 2:
+						_road_batch.add_smooth_strip(lb_sol_pts, 0.95, mark_col, false, false, b_lat)
+		else:
+			# One-way road lane dividers + crisp one-way chevrons
+			var lanes_ow: int = lf if ow > 0 else lb
+			var sign_ow: float = 1.0 if ow > 0 else -1.0
+			for k in range(lanes_ow - 1):
+				var lat_a: float = sign_ow * RoadGeom.get_lane_lateral_offset(ow, float(k), lanes_ow, lanes_ow, lht)
+				var lat_b: float = sign_ow * RoadGeom.get_lane_lateral_offset(ow, float(k + 1), lanes_ow, lanes_ow, lht)
+				_road_batch.add_dashed_polyline(m_pts, 0.90, mark_soft, 5.4, 6.4, 0.5 * (lat_a + lat_b))
+			var mid_s: float = 0.5 * (p_s0 + p_s1)
+			var ow_raw: Dictionary = RoadGeom.sample_polyline_raw(pts, cum, mid_s)
+			var ow_dir: Vector2 = (ow_raw["dir"] as Vector2) * sign_ow
+			_add_lane_turn_arrow(ow_raw["pos"], ow_dir, Vector2(-ow_dir.y, ow_dir.x), false, true, false, mark_col)
+
+	# Pass 5.6: Junction Stop Bars, Yield Shark-Teeth, Roundabout Dashed Dividers & Approach Turn Arrows
+	for j in sim.junctions:
+		if not sim.unlocked_regions.has(int(j["regionIndex"])):
+			continue
+		var jp: Vector2 = j["pos"]
+		var ctrl := String(j["control"])
+		var geom: Dictionary = j.get("geom", {})
+		var gkind := String(geom.get("kind", "empty"))
+		var arms: Array = geom.get("arms", [])
+
+		if gkind == "roundabout" or gkind == "roundabout2":
+			var r_isl: float = float(geom["r_island"])
+			var r_out: float = float(geom["r_outer"])
+			if gkind == "roundabout2":
+				_road_batch.add_dashed_ring(jp, 0.5 * (r_isl + r_out), 1.0, mark_soft, 18, 0.48)
+			for a in arms:
+				if not bool(a["can_enter"]):
+					continue
+				_add_approach_control_and_arrows(j, a, "roundabout_yield", lht, mark_col, mark_soft)
+		elif gkind == "standard" and (arms.size() >= 3 or ctrl == "lights"):
+			var minor_ids: Array = j.get("yieldMinorEdgeIds", [])
+			for a in arms:
+				if not bool(a["can_enter"]):
+					continue
+				var line_mode := "none"
+				if ctrl == "lights":
+					line_mode = "stop_bar"
+				elif ctrl == "yield" and minor_ids.has(String(a["edge_id"])):
+					line_mode = "yield_teeth"
+				_add_approach_control_and_arrows(j, a, line_mode, lht, mark_col, mark_soft)
+
+func _add_hatched_median_gore(pts: PackedVector2Array, cum: PackedFloat32Array, s0: float, s1: float, lat_off: float, col: Color) -> void:
+	var s_cur: float = s0 + 1.5
+	while s_cur < s1 - 1.2:
+		var raw: Dictionary = RoadGeom.sample_polyline_raw(pts, cum, s_cur)
+		var c: Vector2 = (raw["pos"] as Vector2) + (raw["right"] as Vector2) * lat_off
+		var d: Vector2 = raw["dir"]
+		var rn: Vector2 = raw["right"]
+		_road_batch.add_smooth_strip(
+			PackedVector2Array([c - rn * 1.15 - d * 0.9, c + rn * 1.15 + d * 0.9]),
+			0.75, col, false, false
+		)
+		s_cur += 2.8
+
+func _add_approach_control_and_arrows(
+	j: Dictionary,
+	a: Dictionary,
+	line_mode: String,
+	lht: bool,
+	mark_col: Color,
+	mark_soft: Color
+) -> void:
+	var eid := String(a["edge_id"])
+	if not sim.road_map.has(eid):
 		return
-	var mid_i: int = pts.size() / 2
-	var a: Vector2 = pts[maxi(0, mid_i - 1)]
-	var b: Vector2 = pts[mini(pts.size() - 1, mid_i)]
-	var dir: Vector2 = (b - a).normalized()
-	if not forward:
-		dir = -dir
-	var nrm := Vector2(-dir.y, dir.x)
-	var c: Vector2 = a.lerp(b, 0.5)
-	_road_batch.add_tri(c + dir * 5.0, c - dir * 3.4 + nrm * 3.6, c - dir * 3.4 - nrm * 3.6, COL_LANE_MARK)
+	var r: Dictionary = sim.road_map[eid]
+	var is_start: bool = bool(a["is_start"])
+	var in_fwd: bool = not is_start # Entering J moves toward from-node if is_start, else toward to-node
+	var ow: int = int(r["oneWay"])
+	var lanes_in: int = maxi(1, int(r["lanesForward"]) if in_fwd else int(r["lanesBackward"]))
+	var lanes_opp: int = maxi(1, int(r["lanesBackward"]) if in_fwd else int(r["lanesForward"]))
+
+	var p_th: Vector2 = a["throat_pos"]
+	var u_out: Vector2 = a["throat_out_dir"]
+	var in_dir: Vector2 = -u_out # Unit vector pointing INTO junction J
+	var in_right := Vector2(-in_dir.y, in_dir.x)
+
+	var lat_outer: float = RoadGeom.get_lane_lateral_offset(ow, 0.0, lanes_in, lanes_opp, lht)
+	var lat_inner: float = RoadGeom.get_lane_lateral_offset(ow, float(lanes_in - 1), lanes_in, lanes_opp, lht)
+	var half_span: float = RoadGeom.LANE_WIDTH * 0.46
+	var min_lat: float = minf(lat_outer, lat_inner) - half_span
+	var max_lat: float = maxf(lat_outer, lat_inner) + half_span
+
+	if line_mode == "stop_bar":
+		# Crisp solid white stop bar strictly across incoming lanes (exact match to game_stop.webp!)
+		var bar_a: Vector2 = p_th + in_right * min_lat
+		var bar_b: Vector2 = p_th + in_right * max_lat
+		_road_batch.add_smooth_strip(PackedVector2Array([bar_a, bar_b]), 1.85, mark_col, false, false)
+	elif line_mode == "yield_teeth" or line_mode == "roundabout_yield":
+		# Crisp white shark-teeth yield line across incoming lanes
+		var span_w: float = max_lat - min_lat
+		var n_teeth: int = maxi(2, int(round(span_w / 2.6)))
+		var step_w: float = span_w / float(n_teeth)
+		var line_pos: Vector2 = p_th + (in_dir * 2.2 if line_mode == "roundabout_yield" else Vector2.ZERO)
+		for ti in range(n_teeth):
+			var c_lat: float = min_lat + (float(ti) + 0.5) * step_w
+			var tc: Vector2 = line_pos + in_right * c_lat
+			var tw: float = step_w * 0.36
+			_road_batch.add_tri(tc + in_dir * 1.45, tc - in_dir * 0.85 - in_right * tw, tc - in_dir * 0.85 + in_right * tw, mark_col)
+		if line_mode == "yield_teeth":
+			# Neat roadside Yield sign on the outer curb (never blocking the roadway!)
+			var curb_lat: float = (min_lat - 2.6) if lht else (max_lat + 2.6)
+			var sign_c: Vector2 = p_th - in_dir * 2.0 + in_right * curb_lat
+			_road_batch.add_tri(sign_c + in_dir * 2.7, sign_c - in_dir * 1.9 - in_right * 2.5, sign_c - in_dir * 1.9 + in_right * 2.5, Color("C8323A"))
+			_road_batch.add_tri(sign_c + in_dir * 1.4, sign_c - in_dir * 1.1 - in_right * 1.3, sign_c - in_dir * 1.1 + in_right * 1.3, Color("FAF7EE"))
+
+	# Paint crisp lane turn arrows behind the stop/yield line on approaches with room
+	var rlen: float = float(a["rlen"])
+	var trim: float = float(a["trim"])
+	if rlen - trim < 23.0:
+		return
+	var turns: Dictionary = a.get("turns", {"left": false, "straight": true, "right": false})
+	var t_l: bool = bool(turns.get("left", false))
+	var t_s: bool = bool(turns.get("straight", true))
+	var t_r: bool = bool(turns.get("right", false))
+	if line_mode == "roundabout_yield":
+		# Entering roundabout deflects left in LHT, right in RHT
+		t_l = lht
+		t_s = true
+		t_r = not lht
+
+	var s_arrow: float = (trim + 8.2) if is_start else (rlen - trim - 8.2)
+	var raw_ar: Dictionary = RoadGeom.sample_polyline_raw(r["pts"], r["cum_len"], s_arrow)
+	var ar_dir: Vector2 = -(raw_ar["dir"] as Vector2) if is_start else (raw_ar["dir"] as Vector2)
+	var ar_right := Vector2(-ar_dir.y, ar_dir.x)
+	var ar_center_road: Vector2 = raw_ar["pos"]
+
+	for li in range(lanes_in):
+		var lat_l: float = RoadGeom.get_lane_lateral_offset(ow, float(li), lanes_in, lanes_opp, lht)
+		var lane_c: Vector2 = ar_center_road + ar_right * lat_l
+		var l_flag := t_l
+		var s_flag := t_s
+		var r_flag := t_r
+		if lanes_in >= 2 and line_mode != "roundabout_yield":
+			if lht:
+				# Lane 0 = leftmost curb lane, Lane lanes_in-1 = rightmost inner lane
+				if li == 0:
+					r_flag = false
+					if not l_flag:
+						s_flag = true
+				elif li == lanes_in - 1:
+					l_flag = false
+					if not r_flag:
+						s_flag = true
+				else:
+					l_flag = false
+					r_flag = false
+					s_flag = true
+			else:
+				if li == 0:
+					l_flag = false
+					if not r_flag:
+						s_flag = true
+				elif li == lanes_in - 1:
+					r_flag = false
+					if not l_flag:
+						s_flag = true
+				else:
+					l_flag = false
+					r_flag = false
+					s_flag = true
+		if not l_flag and not s_flag and not r_flag:
+			s_flag = true
+		_add_lane_turn_arrow(lane_c, ar_dir, ar_right, l_flag, s_flag, r_flag, mark_soft)
+
+func _add_lane_turn_arrow(
+	c: Vector2,
+	dir: Vector2,
+	right_n: Vector2,
+	allow_left: bool,
+	allow_straight: bool,
+	allow_right: bool,
+	col: Color
+) -> void:
+	var stem_end: float = 1.2 if allow_straight else 0.4
+	_road_batch.add_smooth_strip(
+		PackedVector2Array([c - dir * 2.7, c + dir * stem_end]),
+		0.86, col, false, false
+	)
+	if allow_straight:
+		_road_batch.add_tri(
+			c + dir * 3.3,
+			c + dir * 1.0 - right_n * 1.45,
+			c + dir * 1.0 + right_n * 1.45,
+			col
+		)
+	if allow_left:
+		var p_branch: Vector2 = c + dir * 0.2
+		var p_tip_base: Vector2 = c + dir * 0.7 - right_n * 1.65
+		_road_batch.add_smooth_strip(PackedVector2Array([p_branch, p_tip_base]), 0.78, col, false, false)
+		_road_batch.add_tri(
+			c + dir * 0.85 - right_n * 3.1,
+			p_tip_base + dir * 1.15,
+			p_tip_base - dir * 1.05,
+			col
+		)
+	if allow_right:
+		var p_branch_r: Vector2 = c + dir * 0.2
+		var p_tip_base_r: Vector2 = c + dir * 0.7 + right_n * 1.65
+		_road_batch.add_smooth_strip(PackedVector2Array([p_branch_r, p_tip_base_r]), 0.78, col, false, false)
+		_road_batch.add_tri(
+			c + dir * 0.85 + right_n * 3.1,
+			p_tip_base_r - dir * 1.05,
+			p_tip_base_r + dir * 1.15,
+			col
+		)
 
 
 class _StaticBatchLayer extends Node2D:
@@ -466,14 +952,32 @@ class _DynamicWorldDrawer extends Node2D:
 		var zoom_x: float = owner_view.camera.zoom.x
 		var font: Font = owner_view._ui_font if owner_view._ui_font != null else ThemeDB.fallback_font
 
-		# 1. Selected / Hovered Highlights & Route Creator Preview
+		# 1. Active Rule-Hint Rings (rule_hints.gdshader style) & Selected Junction Lane-Connector Bands
+		var tool_s := owner_view.active_tool
+		if tool_s == "yield" or tool_s == "roundabout" or tool_s == "lights":
+			var rot_phase: float = float(Time.get_ticks_msec()) * 0.0012
+			for j_hint in sim.junctions:
+				if not sim.unlocked_regions.has(int(j_hint["regionIndex"])):
+					continue
+				var jhp: Vector2 = j_hint["pos"]
+				if not frustum.has_point(jhp):
+					continue
+				var arms_h: Array = (j_hint.get("geom", {}) as Dictionary).get("arms", [])
+				if arms_h.size() < 3:
+					continue
+				var hr: float = maxf(18.0, float((j_hint.get("geom", {}) as Dictionary).get("r_outer", 12.0)) + 5.5)
+				for di in range(10):
+					var a0: float = rot_phase + TAU * (float(di) / 10.0)
+					draw_arc(jhp, hr, a0, a0 + TAU * 0.052, 5, Color(0.33, 0.56, 0.88, 0.62), 1.8, true)
+
 		if owner_view.selected_road_id != "" and sim.road_map.has(owner_view.selected_road_id):
 			var sr: Dictionary = sim.road_map[owner_view.selected_road_id]
-			draw_polyline(sr["pts"], Color(0.96, 0.78, 0.29, 0.65), 14.0, true)
+			var sr_w: float = float(sr.get("widthPx", 14.0)) + 5.5
+			draw_polyline(sr["pts"], Color(0.35, 0.58, 0.88, 0.45), sr_w, true)
 
 		if owner_view.selected_junction_id != "" and sim.junction_map.has(owner_view.selected_junction_id):
 			var sj: Dictionary = sim.junction_map[owner_view.selected_junction_id]
-			draw_arc(sj["pos"], 18.0, 0.0, TAU, 28, Color("F4C64A"), 3.2, true)
+			_draw_selected_junction_bands_and_ring(sj, sim)
 
 		if owner_view.selected_facility_id != "" and sim.facility_map.has(owner_view.selected_facility_id):
 			var sf: Dictionary = sim.facility_map[owner_view.selected_facility_id]
@@ -501,9 +1005,11 @@ class _DynamicWorldDrawer extends Node2D:
 		elif owner_view.selected_route_id != "":
 			_draw_single_route(sim, owner_view.selected_route_id, frustum)
 
-		# 3. Live Traffic Light Signal Heads
+		# 3. Authentic Corner-Mounted Circular Traffic Light Signal Heads (matching game_stop.webp & game_lights.webp!)
 		for j in sim.junctions:
 			if String(j["control"]) != "lights" or not j.has("light"):
+				continue
+			if not sim.unlocked_regions.has(int(j["regionIndex"])):
 				continue
 			var jp: Vector2 = j["pos"]
 			if not frustum.has_point(jp):
@@ -511,16 +1017,25 @@ class _DynamicWorldDrawer extends Node2D:
 			var lt: Dictionary = j["light"]
 			var stg := String(lt["stage"])
 			var ph: int = int(lt["currentPhase"])
-			var col_a := Color("C8323A")
-			var col_b := Color("C8323A")
-			if ph == 0:
-				col_a = Color("4FB35E") if stg == "green" else (Color("F2AB37") if stg == "yellow" else Color("C8323A"))
-			else:
-				col_b = Color("4FB35E") if stg == "green" else (Color("F2AB37") if stg == "yellow" else Color("C8323A"))
-			draw_circle(jp + Vector2(-5.2, -5.2), 3.3, Color("23242B"))
-			draw_circle(jp + Vector2(-5.2, -5.2), 2.3, col_a)
-			draw_circle(jp + Vector2(5.2, 5.2), 3.3, Color("23242B"))
-			draw_circle(jp + Vector2(5.2, 5.2), 2.3, col_b)
+			var geom_j: Dictionary = j.get("geom", {})
+			var arms_j: Array = geom_j.get("arms", [])
+			for a in arms_j:
+				if not bool(a["can_enter"]):
+					continue
+				var eid_a := String(a["edge_id"])
+				var arm_phase: int = sim.get_edge_phase_at_junction(j, eid_a)
+				var lens_col := Color("D4383B")
+				if arm_phase == ph:
+					lens_col = Color("4FB35E") if stg == "green" else (Color("F2AB37") if stg == "yellow" else Color("D4383B"))
+				var p_th: Vector2 = a["throat_pos"]
+				var in_dir: Vector2 = -(a["throat_out_dir"] as Vector2)
+				var in_right := Vector2(-in_dir.y, in_dir.x)
+				var hw_a: float = float(a["hw"])
+				var curb_side: float = -(hw_a + 3.1) if sim.left_hand_traffic else (hw_a + 3.1)
+				var sig_pos: Vector2 = p_th - in_dir * 1.4 + in_right * curb_side
+				draw_circle(sig_pos + Vector2(0.5, 0.8), 3.6, Color(0, 0, 0, 0.22))
+				draw_circle(sig_pos, 3.6, Color("23242B"))
+				draw_circle(sig_pos, 2.45, lens_col)
 
 		# 4. Station Cargo Trains & Harbour Ships (Pelabuhan Tamperan)
 		for f in sim.facilities:
@@ -582,6 +1097,70 @@ class _DynamicWorldDrawer extends Node2D:
 			if not frustum.has_point(tp):
 				continue
 			_draw_reward_popup(tst, tp, font, inv_z)
+
+	func _draw_selected_junction_bands_and_ring(sj: Dictionary, sim: SimEngine) -> void:
+		var jp: Vector2 = sj["pos"]
+		var geom: Dictionary = sj.get("geom", {})
+		var arms: Array = geom.get("arms", [])
+		var r_ring: float = maxf(22.0, float(geom.get("r_outer", 14.0)) + 8.5)
+		var ctrl := String(sj["control"])
+		var active_ph: int = int((sj.get("light", {}) as Dictionary).get("currentPhase", 0)) if ctrl == "lights" else -1
+
+		# Translucent colored lane-connector bands across the junction (matching steam_u17_lane_bands.png & game_lights.webp!)
+		for i in range(arms.size()):
+			var a_in: Dictionary = arms[i]
+			if not bool(a_in["can_enter"]):
+				continue
+			var eid_in := String(a_in["edge_id"])
+			if not sim.road_map.has(eid_in):
+				continue
+			var r_in: Dictionary = sim.road_map[eid_in]
+			var in_fwd: bool = not bool(a_in["is_start"])
+			var in_lanes: int = maxi(1, int(r_in["lanesForward"]) if in_fwd else int(r_in["lanesBackward"]))
+			var v_in: Vector2 = -(a_in["out_dir"] as Vector2)
+			var is_green_arm: bool = (ctrl == "lights" and sim.get_edge_phase_at_junction(sj, eid_in) == active_ph)
+
+			for k in range(arms.size()):
+				if k == i:
+					continue
+				var a_out: Dictionary = arms[k]
+				if not bool(a_out["can_exit"]):
+					continue
+				var eid_out := String(a_out["edge_id"])
+				if not sim.road_map.has(eid_out):
+					continue
+				var r_out: Dictionary = sim.road_map[eid_out]
+				var out_fwd: bool = bool(a_out["is_start"])
+				var out_lanes: int = maxi(1, int(r_out["lanesForward"]) if out_fwd else int(r_out["lanesBackward"]))
+				var v_out: Vector2 = a_out["out_dir"]
+				var tang: float = atan2(v_in.x * v_out.y - v_in.y * v_out.x, v_in.dot(v_out))
+
+				var band_col: Color
+				var alpha_b: float = 0.46 if is_green_arm else (0.18 if ctrl == "lights" else 0.30)
+				if absf(tang) <= deg_to_rad(38.0):
+					band_col = Color(0.28, 0.70, 0.45, alpha_b) # Straight: emerald green
+				elif tang > 0.0:
+					band_col = Color(0.90, 0.50, 0.22, alpha_b) # Right: warm orange
+				else:
+					band_col = Color(0.45, 0.48, 0.86, alpha_b) # Left: periwinkle blue
+
+				var chosen_in_l: int = 0
+				if in_lanes >= 2:
+					if sim.left_hand_traffic:
+						chosen_in_l = (in_lanes - 1) if tang > deg_to_rad(38.0) else 0
+					else:
+						chosen_in_l = (in_lanes - 1) if tang < -deg_to_rad(38.0) else 0
+				var chosen_out_l: int = mini(chosen_in_l, out_lanes - 1)
+
+				var c_pts: PackedVector2Array = RoadGeom.build_turn_connector_pts(
+					sj, r_in, in_fwd, float(chosen_in_l), in_lanes,
+					r_out, out_fwd, float(chosen_out_l), out_lanes, sim.left_hand_traffic
+				)
+				if c_pts.size() >= 2:
+					draw_polyline(c_pts, band_col, 2.8 if is_green_arm else 2.2, true)
+
+		# Crisp thin blue inspection ring (exact match to steam_u17_lane_bands.png & game_lights.webp!)
+		draw_arc(jp, r_ring, 0.0, TAU, 40, Color(0.35, 0.56, 0.86, 0.88), 1.8, true)
 
 	func _draw_facility_routes_highlight(sim: SimEngine, fac_id: String, frustum: Rect2) -> void:
 		for rt in sim.routes:
@@ -677,7 +1256,7 @@ class _DynamicWorldDrawer extends Node2D:
 				var reqs: Array = f_from.get("inputs", [])
 				gid = String(reqs[0]["good"]) if not reqs.is_empty() else "grain"
 			var gcol: Color = ItIcons.color_of(gid)
-			var fkey := "%s->%s:%s" % [String(rt["fromFacilityId"]), String(rt["toFacilityId"]), gid]
+			var fkey := "%s->%s->%s" % [String(rt["fromFacilityId"]), String(rt["toFacilityId"]), gid]
 			var measured: float = 0.0
 			if sim.flow_edges.has(fkey):
 				measured = float((sim.flow_edges[fkey]["times"] as Array).size())

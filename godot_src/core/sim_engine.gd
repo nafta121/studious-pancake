@@ -57,6 +57,7 @@ var _uid_counter: int = 100
 var _sim_accum: float = 0.0
 var _upkeep_timer: float = 0.0
 var _history_timer: float = 0.0
+var _turn_curve_cache: Dictionary = {}
 
 func initialize(sfx_node: SfxSynth, initial_map: String = "karisidenan_madiun", load_save: bool = true) -> void:
 	sfx = sfx_node
@@ -103,6 +104,7 @@ func load_map(map_id: String, try_restore: bool = true) -> void:
 
 	_hydrate_geometry()
 	_rebuild_lookups()
+	_refresh_network_geometry()
 
 	routes.clear()
 	agents.clear()
@@ -118,6 +120,7 @@ func load_map(map_id: String, try_restore: bool = true) -> void:
 	_uid_counter = 100
 
 	if try_restore and not disable_persistence and _restore_save(current_map_id):
+		_refresh_network_geometry()
 		recompute_all_routes()
 		map_static_dirty.emit()
 		return
@@ -246,6 +249,24 @@ func _rebuild_lookups() -> void:
 		road_map[String(r["id"])] = r
 	for f in facilities:
 		facility_map[String(f["id"])] = f
+
+func _refresh_network_geometry() -> void:
+	_turn_curve_cache.clear()
+	for j in junctions:
+		if String(j["control"]) == "yield" and (j["yieldMinorEdgeIds"] as Array).is_empty():
+			var built_edges: Array = []
+			for eid_v in j["connectedEdgeIds"]:
+				var eid := String(eid_v)
+				if road_map.has(eid) and bool(road_map[eid]["isBuilt"]):
+					built_edges.append(eid)
+			if built_edges.size() >= 3:
+				built_edges.sort_custom(func(a, b):
+					var ra: Dictionary = road_map[String(a)]
+					var rb: Dictionary = road_map[String(b)]
+					return (int(ra["lanesForward"]) + int(ra["lanesBackward"])) > (int(rb["lanesForward"]) + int(rb["lanesBackward"]))
+				)
+				j["yieldMinorEdgeIds"] = built_edges.slice(2)
+	RoadGeom.compute_network_junction_geometry(junctions, roads, road_map, left_hand_traffic)
 
 func _seed_starter_routes() -> void:
 	var r0_facs: Array = []
@@ -736,6 +757,7 @@ func apply_junction_control(junction_id: String, tool: String) -> String:
 		if cur_ctrl == "yield":
 			j["control"] = "none"
 			j["yieldMinorEdgeIds"] = []
+			_refresh_network_geometry()
 			map_static_dirty.emit()
 			if sfx:
 				sfx.tap()
@@ -751,6 +773,7 @@ func apply_junction_control(junction_id: String, tool: String) -> String:
 			return (int(ra["lanesForward"]) + int(ra["lanesBackward"])) > (int(rb["lanesForward"]) + int(rb["lanesBackward"]))
 		)
 		j["yieldMinorEdgeIds"] = edges_sorted.slice(2)
+		_refresh_network_geometry()
 		map_static_dirty.emit()
 		if sfx:
 			sfx.tap()
@@ -768,6 +791,7 @@ func apply_junction_control(junction_id: String, tool: String) -> String:
 			cash -= up_p
 			j["control"] = "roundabout2"
 			spawn_toast(j["pos"] + Vector2(0, -16), "-" + GameCatalog.fmt_cash(up_p), Color("#e67e22"))
+			_refresh_network_geometry()
 			map_static_dirty.emit()
 			if sfx:
 				sfx.tap()
@@ -777,6 +801,7 @@ func apply_junction_control(junction_id: String, tool: String) -> String:
 			cash += ref2
 			j["control"] = "none"
 			spawn_toast(j["pos"] + Vector2(0, -16), "+" + GameCatalog.fmt_cash(ref2), Color("#2b8a3e"))
+			_refresh_network_geometry()
 			map_static_dirty.emit()
 			if sfx:
 				sfx.tap()
@@ -790,6 +815,7 @@ func apply_junction_control(junction_id: String, tool: String) -> String:
 		cash -= rb_p
 		j["control"] = "roundabout"
 		spawn_toast(j["pos"] + Vector2(0, -16), "-" + GameCatalog.fmt_cash(rb_p), Color("#e67e22"))
+		_refresh_network_geometry()
 		map_static_dirty.emit()
 		if sfx:
 			sfx.tap()
@@ -810,6 +836,7 @@ func apply_junction_control(junction_id: String, tool: String) -> String:
 		j["control"] = "lights"
 		j["light"] = _make_default_light()
 		spawn_toast(j["pos"] + Vector2(0, -16), "-" + GameCatalog.fmt_cash(lt_p), Color("#e67e22"))
+		_refresh_network_geometry()
 		map_static_dirty.emit()
 		if sfx:
 			sfx.tap()
@@ -828,6 +855,7 @@ func remove_traffic_lights(junction_id: String) -> void:
 	j["control"] = "none"
 	j.erase("light")
 	spawn_toast(j["pos"] + Vector2(0, -16), "+" + GameCatalog.fmt_cash(ref), Color("#2b8a3e"))
+	_refresh_network_geometry()
 	map_static_dirty.emit()
 	if sfx:
 		sfx.tap()
@@ -865,6 +893,7 @@ func modify_road_lanes(edge_id: String, delta: int) -> String:
 		r["lanesForward"] = nxt
 		r["lanesBackward"] = nxt
 		spawn_toast(mid, "-" + GameCatalog.fmt_cash(price), Color("#e67e22"))
+		_refresh_network_geometry()
 		map_static_dirty.emit()
 		if sfx:
 			sfx.tap()
@@ -878,6 +907,7 @@ func modify_road_lanes(edge_id: String, delta: int) -> String:
 		r["lanesForward"] = cur_lanes - 1
 		r["lanesBackward"] = cur_lanes - 1
 		spawn_toast(mid, "+" + GameCatalog.fmt_cash(refund), Color("#2b8a3e"))
+		_refresh_network_geometry()
 		map_static_dirty.emit()
 		if sfx:
 			sfx.tap()
@@ -891,6 +921,7 @@ func cycle_road_one_way(edge_id: String) -> String:
 		return ""
 	var ow: int = int(r["oneWay"])
 	r["oneWay"] = 1 if ow == 0 else (-1 if ow == 1 else 0)
+	_refresh_network_geometry()
 	recompute_all_routes()
 	map_static_dirty.emit()
 	if sfx:
@@ -908,6 +939,7 @@ func toggle_close_street(edge_id: String) -> String:
 	var mid: Vector2 = pts[pts.size() / 2]
 	if bool(r["closed"]):
 		r["closed"] = false
+		_refresh_network_geometry()
 		recompute_all_routes()
 		map_static_dirty.emit()
 		if sfx:
@@ -922,6 +954,7 @@ func toggle_close_street(edge_id: String) -> String:
 	r["closed"] = true
 	r["oneWay"] = 0
 	spawn_toast(mid, "-" + GameCatalog.fmt_cash(price), Color("#e67e22"))
+	_refresh_network_geometry()
 	recompute_all_routes()
 	map_static_dirty.emit()
 	if sfx:
@@ -945,6 +978,7 @@ func purchase_road_offer(offer_id: String) -> String:
 			for eid in off["edgeIds"]:
 				if road_map.has(String(eid)):
 					road_map[String(eid)]["isBuilt"] = true
+			_refresh_network_geometry()
 			recompute_all_routes()
 			map_static_dirty.emit()
 			if sfx:
@@ -1051,9 +1085,17 @@ func _step_facilities(dt: float) -> void:
 					f["vehicleTimer"] = 18.0 if k == "station" else 22.0
 					f["vehicleCapacityRemaining"] = (40 + 20 * int(f["upgrades"].get("shipSize", 0))) if k == "harbour" else (20 + 10 * int(f["upgrades"].get("trainLength", 0)))
 
-func _get_edge_phase_at_junction(j: Dictionary, edge_id: String) -> int:
+func get_edge_phase_at_junction(j: Dictionary, edge_id: String) -> int:
+	if j.has("geom") and (j["geom"] as Dictionary).has("arms"):
+		var arms: Array = j["geom"]["arms"]
+		for i in range(arms.size()):
+			if String(arms[i]["edge_id"]) == edge_id:
+				return 0 if (i % 2 == 0) else 1
 	var idx: int = (j["connectedEdgeIds"] as Array).find(edge_id)
 	return 0 if (idx < 0 or idx % 2 == 0) else 1
+
+func _get_edge_phase_at_junction(j: Dictionary, edge_id: String) -> int:
+	return get_edge_phase_at_junction(j, edge_id)
 
 func _step_traffic_lights(dt: float) -> void:
 	for j in junctions:
@@ -1249,13 +1291,105 @@ func _get_agent_current_step(ag: Dictionary) -> Dictionary:
 		return {}
 	return path[idx]
 
+func _get_step_trajectory(path: Array, step_idx: int, lane_idx: int) -> Dictionary:
+	var step_d: Dictionary = path[step_idx]
+	var eid := String(step_d["edgeId"])
+	var edge: Dictionary = road_map[eid]
+	var forward: bool = bool(step_d["forward"])
+	var lanes_dir: int = maxi(1, int(edge["lanesForward"]) if forward else int(edge["lanesBackward"]))
+	var opp_lanes: int = maxi(1, int(edge["lanesBackward"]) if forward else int(edge["lanesForward"]))
+	var clamped_lane: int = clampi(lane_idx, 0, lanes_dir - 1)
+
+	var has_next: bool = (step_idx + 1) < path.size() and road_map.has(String(path[step_idx + 1]["edgeId"]))
+	var next_sig: String = "END"
+	if has_next:
+		var ns: Dictionary = path[step_idx + 1]
+		next_sig = "%s:%d" % [String(ns["edgeId"]), 1 if bool(ns["forward"]) else 0]
+	var cache_key := "%s:%d:%d->%s:%d" % [eid, 1 if forward else 0, clamped_lane, next_sig, 1 if left_hand_traffic else 0]
+	if _turn_curve_cache.has(cache_key):
+		return _turn_curve_cache[cache_key]
+
+	var rlen: float = float(edge["lengthPx"])
+	var trim_in: float = float(edge.get("trimStart", 0.0)) if forward else float(edge.get("trimEnd", 0.0))
+	var trim_out: float = float(edge.get("trimEnd", 0.0)) if forward else float(edge.get("trimStart", 0.0))
+	if step_idx == 0:
+		trim_in = minf(trim_in, rlen * 0.25)
+	if not has_next:
+		trim_out = minf(trim_out, rlen * 0.25)
+
+	var s_begin: float = clampf(trim_in, 0.0, maxf(0.0, rlen - 3.0))
+	var s_finish: float = clampf(rlen - trim_out, s_begin + 2.5, rlen)
+
+	var stitched := PackedVector2Array()
+	var sample_count: int = maxi(4, int(ceil((s_finish - s_begin) / 5.5)))
+	for i in range(sample_count + 1):
+		var s_val: float = lerpf(s_begin, s_finish, float(i) / float(sample_count))
+		var rp: Dictionary = RoadGeom.sample_road_pose(
+			edge["pts"], edge["cum_len"], rlen, int(edge["oneWay"]),
+			forward, s_val, float(clamped_lane), lanes_dir, left_hand_traffic, opp_lanes
+		)
+		var vp: Vector2 = rp["pos"]
+		if stitched.is_empty() or stitched[stitched.size() - 1].distance_to(vp) > 0.08:
+			stitched.append(vp)
+
+	var cum_road: PackedFloat32Array = RoadGeom.build_cum_lengths(stitched)
+	var stop_s: float = cum_road[cum_road.size() - 1] if cum_road.size() > 0 else 4.0
+
+	if has_next:
+		var j_ahead: Dictionary = junction_map.get(String(step_d["toJunctionId"]), {})
+		if not j_ahead.is_empty():
+			var nxt_step: Dictionary = path[step_idx + 1]
+			var nxt_edge: Dictionary = road_map[String(nxt_step["edgeId"])]
+			var nxt_fwd: bool = bool(nxt_step["forward"])
+			var nxt_lanes: int = maxi(1, int(nxt_edge["lanesForward"]) if nxt_fwd else int(nxt_edge["lanesBackward"]))
+			var out_lane: int = mini(clamped_lane, nxt_lanes - 1)
+			var conn: PackedVector2Array = RoadGeom.build_turn_connector_pts(
+				j_ahead, edge, forward, float(clamped_lane), lanes_dir,
+				nxt_edge, nxt_fwd, float(out_lane), nxt_lanes, left_hand_traffic
+			)
+			for cp in conn:
+				if stitched.is_empty() or stitched[stitched.size() - 1].distance_to(cp) > 0.08:
+					stitched.append(cp)
+
+	var cum_all: PackedFloat32Array = RoadGeom.build_cum_lengths(stitched)
+	var tot_l: float = maxf(4.0, cum_all[cum_all.size() - 1] if cum_all.size() > 0 else 4.0)
+	var entry := {
+		"pts": stitched,
+		"cum_len": cum_all,
+		"stop_s": stop_s,
+		"total_len": tot_l
+	}
+	_turn_curve_cache[cache_key] = entry
+	return entry
+
+func _sample_agent_step_pose(path: Array, step_idx: int, visual_lane: float, s_px: float) -> Dictionary:
+	var step_d: Dictionary = path[step_idx]
+	var edge: Dictionary = road_map[String(step_d["edgeId"])]
+	var fwd: bool = bool(step_d["forward"])
+	var lanes_dir: int = maxi(1, int(edge["lanesForward"]) if fwd else int(edge["lanesBackward"]))
+	var vl: float = clampf(visual_lane, 0.0, float(lanes_dir - 1))
+	var l0: int = int(floor(vl))
+	var l1: int = mini(lanes_dir - 1, l0 + 1)
+	var frac: float = vl - float(l0)
+	var tr0: Dictionary = _get_step_trajectory(path, step_idx, l0)
+	var p0: Dictionary = RoadGeom.sample_stitched_pose(tr0["pts"], tr0["cum_len"], s_px)
+	if frac < 0.03 or l0 == l1:
+		return p0
+	var tr1: Dictionary = _get_step_trajectory(path, step_idx, l1)
+	var p1: Dictionary = RoadGeom.sample_stitched_pose(tr1["pts"], tr1["cum_len"], s_px)
+	return {
+		"pos": (p0["pos"] as Vector2).lerp(p1["pos"] as Vector2, frac),
+		"heading": lerp_angle(float(p0["heading"]), float(p1["heading"]), frac)
+	}
+
 func _update_driving_agent(ag: Dictionary, rt: Dictionary, tdef: Dictionary, lane_buckets: Dictionary, dt: float) -> void:
 	var path: Array = rt["forwardPath"] if String(ag["state"]) == "driving_outbound" else rt["returnPath"]
-	if int(ag["stepIndex"]) >= path.size():
+	var s_idx: int = int(ag["stepIndex"])
+	if s_idx >= path.size():
 		_finish_agent_leg(ag, rt)
 		return
 
-	var step_d: Dictionary = path[int(ag["stepIndex"])]
+	var step_d: Dictionary = path[s_idx]
 	var eid := String(step_d["edgeId"])
 	if not road_map.has(eid):
 		_finish_agent_leg(ag, rt)
@@ -1265,6 +1399,10 @@ func _update_driving_agent(ag: Dictionary, rt: Dictionary, tdef: Dictionary, lan
 	var lanes_dir: int = maxi(1, int(edge["lanesForward"]) if forward else int(edge["lanesBackward"]))
 	if int(ag["laneIndex"]) >= lanes_dir:
 		ag["laneIndex"] = lanes_dir - 1
+
+	var traj: Dictionary = _get_step_trajectory(path, s_idx, int(ag["laneIndex"]))
+	var stop_s: float = float(traj["stop_s"])
+	var step_total_len: float = float(traj["total_len"])
 
 	var key := "%s:%d" % [eid, 1 if forward else 0]
 	var bucket: Array = lane_buckets.get(key, [])
@@ -1277,8 +1415,8 @@ func _update_driving_agent(ag: Dictionary, rt: Dictionary, tdef: Dictionary, lan
 			if leader.is_empty() or float(other["sPx"]) < float(leader["sPx"]):
 				leader = other
 
-	# Cooperative overtake on multi-lane roads
-	if not leader.is_empty() and lanes_dir > 1 and float(leader["sPx"]) - float(ag["sPx"]) < float(tdef["body_len"]) + 20.0 and float(leader["speedPx"]) < float(tdef["max_speed_px"]) * 0.72:
+	# Cooperative overtake on multi-lane roads (only before junction stop line)
+	if float(ag["sPx"]) < stop_s - 8.0 and not leader.is_empty() and lanes_dir > 1 and float(leader["sPx"]) - float(ag["sPx"]) < float(tdef["body_len"]) + 20.0 and float(leader["speedPx"]) < float(tdef["max_speed_px"]) * 0.72:
 		for cand_lane in range(lanes_dir):
 			if cand_lane == int(ag["laneIndex"]):
 				continue
@@ -1289,6 +1427,9 @@ func _update_driving_agent(ag: Dictionary, rt: Dictionary, tdef: Dictionary, lan
 					break
 			if clear_lane:
 				ag["laneIndex"] = cand_lane
+				traj = _get_step_trajectory(path, s_idx, cand_lane)
+				stop_s = float(traj["stop_s"])
+				step_total_len = float(traj["total_len"])
 				leader = {}
 				break
 
@@ -1304,45 +1445,54 @@ func _update_driving_agent(ag: Dictionary, rt: Dictionary, tdef: Dictionary, lan
 	if not leader.is_empty():
 		var leader_body: float = float(GameCatalog.TRUCKS[String(leader["model"])]["body_len"])
 		var gap: float = float(leader["sPx"]) - float(ag["sPx"]) - leader_body * 0.5 - float(tdef["body_len"]) * 0.5
-		if gap < 9.0:
+		if gap < 8.5:
 			target_v = 0.0
 			ag["waitReason"] = "following"
-		elif gap < 28.0:
+		elif gap < 26.0:
 			target_v = minf(target_v, float(leader["speedPx"]) * 0.90)
 			ag["waitReason"] = "following"
 
-	var dist_to_end: float = float(edge["lengthPx"]) - float(ag["sPx"])
+	# Stop/yield control strictly BEFORE stop_s (vehicles already past stop_s clear the junction/roundabout!)
+	var cab_stop_line: float = maxf(0.0, stop_s - float(tdef["cab_len"]) * 0.48 - 1.4)
+	var dist_to_stop: float = cab_stop_line - float(ag["sPx"])
 	var j_ahead: Dictionary = junction_map.get(String(step_d["toJunctionId"]), {})
-	if not j_ahead.is_empty() and dist_to_end < 54.0:
+	if not j_ahead.is_empty():
 		var ctrl := String(j_ahead["control"])
-		if ctrl == "lights" and j_ahead.has("light"):
-			var lt: Dictionary = j_ahead["light"]
-			var my_phase: int = _get_edge_phase_at_junction(j_ahead, eid)
-			if int(lt["currentPhase"]) == my_phase and String(lt["stage"]) == "green":
-				lt["lastDetectorHit"] = real_time_sec
-				target_v = minf(target_v, 44.0)
-			else:
-				if dist_to_end < 14.0:
-					target_v = 0.0
-					ag["waitReason"] = "red_light"
+		if float(ag["sPx"]) <= cab_stop_line + 1.5 and dist_to_stop < 48.0:
+			if ctrl == "lights" and j_ahead.has("light"):
+				var lt: Dictionary = j_ahead["light"]
+				var my_phase: int = get_edge_phase_at_junction(j_ahead, eid)
+				if int(lt["currentPhase"]) == my_phase and String(lt["stage"]) == "green":
+					lt["lastDetectorHit"] = real_time_sec
+					target_v = minf(target_v, 44.0)
 				else:
-					target_v = minf(target_v, maxf(6.0, dist_to_end * 0.8))
-		elif ctrl == "yield":
-			var is_minor: bool = (j_ahead["yieldMinorEdgeIds"] as Array).has(eid)
-			if is_minor and dist_to_end < 20.0 and float(ag["junctionWaitSec"]) < 1.2:
-				var conflict: bool = _has_junction_conflict(String(j_ahead["id"]), eid)
-				if conflict:
+					if dist_to_stop <= 3.2:
+						target_v = 0.0
+						ag["waitReason"] = "red_light"
+					else:
+						target_v = minf(target_v, maxf(5.5, dist_to_stop * 0.95))
+			elif ctrl == "yield":
+				var is_minor: bool = (j_ahead["yieldMinorEdgeIds"] as Array).has(eid)
+				if is_minor and dist_to_stop <= 8.5 and float(ag["junctionWaitSec"]) < 1.2:
+					if _has_junction_conflict(String(j_ahead["id"]), eid):
+						target_v = 0.0
+						ag["waitReason"] = "yield"
+				elif String(ag["model"]) != "express":
+					target_v = minf(target_v, 36.0)
+			elif ctrl == "roundabout" or ctrl == "roundabout2":
+				var cap_rb: int = 4 if ctrl == "roundabout2" else 2
+				var rb_rad: float = float((j_ahead.get("geom", {}) as Dictionary).get("r_outer", 18.0)) + 4.0
+				if dist_to_stop <= 7.0 and float(ag["junctionWaitSec"]) < 0.9 and _count_near_junction(String(j_ahead["id"]), rb_rad) >= cap_rb:
 					target_v = 0.0
-					ag["waitReason"] = "yield"
-			elif String(ag["model"]) != "express":
-				target_v = minf(target_v, 36.0)
-		elif ctrl == "roundabout" or ctrl == "roundabout2":
-			var cap_rb: int = 4 if ctrl == "roundabout2" else 2
-			if dist_to_end < 16.0 and float(ag["junctionWaitSec"]) < 0.9 and _count_near_junction(String(j_ahead["id"]), 24.0) >= cap_rb:
-				target_v = 0.0
-				ag["waitReason"] = "roundabout"
+					ag["waitReason"] = "roundabout"
+				else:
+					target_v = minf(target_v, 34.0 if ctrl == "roundabout2" else 27.0)
+		elif float(ag["sPx"]) > cab_stop_line + 1.5:
+			# Inside junction / roundabout circulatory ring: smooth cornering speed
+			if ctrl == "roundabout" or ctrl == "roundabout2":
+				target_v = minf(target_v, 33.0 if ctrl == "roundabout2" else 26.0)
 			else:
-				target_v = minf(target_v, 36.0 if ctrl == "roundabout2" else 28.0)
+				target_v = minf(target_v, 38.0)
 
 	var cur_v: float = float(ag["speedPx"])
 	if cur_v < target_v:
@@ -1365,58 +1515,41 @@ func _update_driving_agent(ag: Dictionary, rt: Dictionary, tdef: Dictionary, lan
 	ag["sPx"] = float(ag["sPx"]) + cur_v * dt
 	ag["visualLane"] = lerpf(float(ag["visualLane"]), float(ag["laneIndex"]), minf(1.0, dt * 8.0))
 
-	if float(ag["sPx"]) >= float(edge["lengthPx"]):
-		ag["sPx"] = float(ag["sPx"]) - float(edge["lengthPx"])
-		ag["stepIndex"] = int(ag["stepIndex"]) + 1
+	if float(ag["sPx"]) >= step_total_len:
+		ag["sPx"] = float(ag["sPx"]) - step_total_len
+		ag["stepIndex"] = s_idx + 1
 		ag["junctionWaitSec"] = 0.0
-		if int(ag["stepIndex"]) >= path.size():
+		s_idx = int(ag["stepIndex"])
+		if s_idx >= path.size():
 			_finish_agent_leg(ag, rt)
 			return
 
-	var active_step: Dictionary = path[int(ag["stepIndex"])]
-	var active_edge: Dictionary = road_map[String(active_step["edgeId"])]
-	var active_fwd: bool = bool(active_step["forward"])
-	var active_lanes: int = maxi(1, int(active_edge["lanesForward"]) if active_fwd else int(active_edge["lanesBackward"]))
-
-	var pose: Dictionary = RoadGeom.sample_road_pose(
-		active_edge["pts"],
-		active_edge["cum_len"],
-		float(active_edge["lengthPx"]),
-		int(active_edge["oneWay"]),
-		active_fwd,
-		float(ag["sPx"]),
-		minf(float(active_lanes - 1), float(ag["visualLane"])),
-		active_lanes,
-		left_hand_traffic
-	)
+	var pose: Dictionary = _sample_agent_step_pose(path, s_idx, float(ag["visualLane"]), float(ag["sPx"]))
 	ag["pos"] = pose["pos"]
 	ag["heading"] = pose["heading"]
 
 	var t_poses: Array = ag["trailerPoses"]
-	var spacing: float = 8.8
+	var spacing: float = 8.6
 	for ti in range(t_poses.size()):
 		var tr_s: float = float(ag["sPx"]) - float(ti + 1) * spacing
 		if tr_s >= 0.0:
-			var tp: Dictionary = RoadGeom.sample_road_pose(
-				active_edge["pts"],
-				active_edge["cum_len"],
-				float(active_edge["lengthPx"]),
-				int(active_edge["oneWay"]),
-				active_fwd,
-				tr_s,
-				minf(float(active_lanes - 1), float(ag["visualLane"])),
-				active_lanes,
-				left_hand_traffic
-			)
+			var tp: Dictionary = _sample_agent_step_pose(path, s_idx, float(ag["visualLane"]), tr_s)
 			t_poses[ti]["pos"] = tp["pos"]
 			t_poses[ti]["heading"] = tp["heading"]
+		elif s_idx > 0 and road_map.has(String(path[s_idx - 1]["edgeId"])):
+			var prev_traj: Dictionary = _get_step_trajectory(path, s_idx - 1, int(ag["laneIndex"]))
+			var prev_s: float = maxf(0.0, float(prev_traj["total_len"]) + tr_s)
+			var tp_prev: Dictionary = _sample_agent_step_pose(path, s_idx - 1, float(ag["visualLane"]), prev_s)
+			t_poses[ti]["pos"] = tp_prev["pos"]
+			t_poses[ti]["heading"] = tp_prev["heading"]
 		else:
 			var lead_p: Vector2 = ag["pos"] if ti == 0 else t_poses[ti - 1]["pos"]
 			var cur_p: Vector2 = t_poses[ti]["pos"]
 			var delta_v: Vector2 = lead_p - cur_p
-			var ang: float = atan2(delta_v.y, delta_v.x)
+			var ang: float = float(ag["heading"]) if delta_v.length_squared() < 0.01 else atan2(delta_v.y, delta_v.x)
 			t_poses[ti]["heading"] = ang
 			t_poses[ti]["pos"] = lead_p - Vector2(cos(ang), sin(ang)) * spacing
+
 
 func _finish_agent_leg(ag: Dictionary, rt: Dictionary) -> void:
 	ag["speedPx"] = 0.0

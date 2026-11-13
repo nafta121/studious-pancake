@@ -102,26 +102,95 @@ func add_polygon_safe(poly: PackedVector2Array, col: Color) -> void:
 		for i in range(poly.size()):
 			add_tri(c, poly[i], poly[(i + 1) % poly.size()], col)
 
-func add_polyline(pts: PackedVector2Array, width: float, col: Color, closed_loop: bool = false, round_caps: bool = true) -> void:
-	var n: int = pts.size()
+func add_arc_strip(center: Vector2, radius: float, width: float, a_start: float, a_end: float, col: Color, segs: int = 16) -> void:
+	if absf(a_end - a_start) < 0.001 or segs < 1:
+		return
+	var r_in: float = maxf(0.1, radius - width * 0.5)
+	var r_out: float = radius + width * 0.5
+	var steps: int = maxi(2, segs)
+	for i in range(steps):
+		var a0: float = lerpf(a_start, a_end, float(i) / float(steps))
+		var a1: float = lerpf(a_start, a_end, float(i + 1) / float(steps))
+		var d0 := Vector2(cos(a0), sin(a0))
+		var d1 := Vector2(cos(a1), sin(a1))
+		add_quad(center + d0 * r_in, center + d0 * r_out, center + d1 * r_out, center + d1 * r_in, col)
+
+func add_dashed_ring(center: Vector2, radius: float, width: float, col: Color, dash_count: int = 16, duty: float = 0.52) -> void:
+	var step_ang: float = TAU / float(maxi(4, dash_count))
+	var dash_ang: float = step_ang * clampf(duty, 0.15, 0.85)
+	for i in range(maxi(4, dash_count)):
+		var a0: float = float(i) * step_ang
+		add_arc_strip(center, radius, width, a0, a0 + dash_ang, col, 3)
+
+func add_smooth_strip(pts: PackedVector2Array, width: float, col: Color, closed_loop: bool = false, round_caps: bool = false, lateral_offset: float = 0.0) -> void:
+	var clean := PackedVector2Array()
+	for p in pts:
+		if clean.is_empty() or clean[clean.size() - 1].distance_to(p) > 0.05:
+			clean.append(p)
+	if closed_loop and clean.size() >= 3 and clean[0].distance_to(clean[clean.size() - 1]) <= 0.1:
+		clean.remove_at(clean.size() - 1)
+	var n: int = clean.size()
 	if n < 2:
 		return
-	var hw: float = width * 0.5
-	var count: int = n if closed_loop else n - 1
-	for i in range(count):
-		var a: Vector2 = pts[i]
-		var b: Vector2 = pts[(i + 1) % n]
+
+	var seg_normals: Array[Vector2] = []
+	var seg_count: int = n if closed_loop else (n - 1)
+	for i in range(seg_count):
+		var a: Vector2 = clean[i]
+		var b: Vector2 = clean[(i + 1) % n]
 		var d: Vector2 = b - a
 		var l: float = d.length()
-		if l < 0.001:
-			continue
-		var nrm := Vector2(-d.y / l, d.x / l) * hw
-		add_quad(a - nrm, a + nrm, b + nrm, b - nrm, col)
-		if round_caps and i > 0:
-			add_circle(a, hw, col, 8)
+		if l < 0.0001:
+			seg_normals.append(Vector2(0.0, 1.0))
+		else:
+			seg_normals.append(Vector2(-d.y / l, d.x / l))
+
+	var hw: float = width * 0.5
+	var base: int = verts.size()
+	for i in range(n):
+		var nrm: Vector2
+		var stretch: float = 1.0
+		if not closed_loop and i == 0:
+			nrm = seg_normals[0]
+		elif not closed_loop and i == n - 1:
+			nrm = seg_normals[seg_count - 1]
+		else:
+			var n_prev: Vector2 = seg_normals[(i - 1 + seg_count) % seg_count]
+			var n_curr: Vector2 = seg_normals[i % seg_count]
+			var sum_n: Vector2 = n_prev + n_curr
+			if sum_n.length_squared() < 0.001:
+				nrm = n_curr
+				stretch = 1.0
+			else:
+				nrm = sum_n.normalized()
+				stretch = minf(2.0, 1.0 / maxf(0.5, nrm.dot(n_curr)))
+		var center_p: Vector2 = clean[i] + nrm * (lateral_offset * stretch)
+		var off: Vector2 = nrm * (hw * stretch)
+		verts.append(center_p - off)
+		verts.append(center_p + off)
+		colors.append(col)
+		colors.append(col)
+		uvs.append(Vector2.ZERO)
+		uvs.append(Vector2.ZERO)
+
+	for i in range(seg_count):
+		var i0: int = base + i * 2
+		var i1: int = base + ((i + 1) % n) * 2
+		indices.append(i0)
+		indices.append(i0 + 1)
+		indices.append(i1 + 1)
+		indices.append(i0)
+		indices.append(i1 + 1)
+		indices.append(i1)
+
 	if round_caps and not closed_loop:
-		add_circle(pts[0], hw, col, 8)
-		add_circle(pts[n - 1], hw, col, 8)
+		var c0: Vector2 = clean[0] + seg_normals[0] * lateral_offset
+		var c1: Vector2 = clean[n - 1] + seg_normals[seg_count - 1] * lateral_offset
+		add_circle(c0, hw, col, 10)
+		add_circle(c1, hw, col, 10)
+
+func add_polyline(pts: PackedVector2Array, width: float, col: Color, closed_loop: bool = false, round_caps: bool = true) -> void:
+	add_smooth_strip(pts, width, col, closed_loop, round_caps, 0.0)
 
 func add_dashed_polyline(pts: PackedVector2Array, width: float, col: Color, dash_len: float = 9.0, gap_len: float = 8.0, lateral_offset: float = 0.0) -> void:
 	var n: int = pts.size()

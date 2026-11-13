@@ -242,6 +242,7 @@ func _prepare_smoke_test() -> void:
 	for ri in [1, 2]:
 		sim.regions[ri]["unlocked"] = true
 	sim._rebuild_lookups()
+	sim._refresh_network_geometry()
 	sim.recompute_all_routes()
 	if sim.facilities.size() >= 10:
 		var r_extra: Dictionary = sim.create_route(String(sim.facilities[2]["id"]), String(sim.facilities[4]["id"]), "any", true)
@@ -302,6 +303,36 @@ func _step_smoke() -> void:
 			sim._step_fixed(SimEngine.SIM_DT)
 	elif _smoke_frame == 40:
 		_save_shot_sync("godot_android_pacitan_harbour.png")
+		# Close-up showcase on Kota Madiun (1280x720): swept Bezier junctions, 2-lane & 1-lane roundabouts,
+		# Kali Madiun bridges, lane markings/arrows, yield shark-teeth, corner signals & lane-connector bands!
+		sim.load_map("kota_madiun", false)
+		sim.cash = 65000
+		for ri2 in [1, 2]:
+			if ri2 < sim.regions.size():
+				sim.regions[ri2]["unlocked"] = true
+		sim._rebuild_lookups()
+		if sim.junction_map.has("km_sleko"):
+			sim.junction_map["km_sleko"]["control"] = "roundabout2"
+		sim._refresh_network_geometry()
+		sim.recompute_all_routes()
+		if sim.facilities.size() >= 7:
+			var r_km: Dictionary = sim.create_route(String(sim.facilities[3]["id"]), String(sim.facilities[5]["id"]), "any", true)
+			if not r_km.is_empty():
+				sim.add_truck_to_route(String(r_km["id"]), false)
+				sim.add_truck_to_route(String(r_km["id"]), false)
+		sim.map_static_dirty.emit()
+		for _s_cu in range(240):
+			sim._step_fixed(SimEngine.SIM_DT)
+		hud.close_drawer()
+		hud.show_toast_banner("", 0.0)
+		map_view.selected_junction_id = "km_pasarbesar"
+		camera.focus_map({"x": -62.0, "y": 90.0, "zoom": 2.15}, sim.map_def["boundsWorld"])
+		hud._layout_responsive()
+		hud.refresh_top_bar()
+		hud._refresh_goals_panel()
+	elif _smoke_frame == 48:
+		_save_shot_sync("godot_android_junction_roundabout_closeup.png")
+		map_view.selected_junction_id = ""
 		DisplayServer.window_set_size(Vector2i(480, 960))
 		get_tree().root.size = Vector2i(480, 960)
 		_on_map_selected("kota_madiun")
@@ -309,7 +340,7 @@ func _step_smoke() -> void:
 			sim._step_fixed(SimEngine.SIM_DT)
 		hud._layout_responsive()
 		hud.open_drawer("maps")
-	elif _smoke_frame == 50:
+	elif _smoke_frame == 58:
 		_save_shot_sync("godot_android_portrait_kota_madiun.png")
 		print("SMOKE_TEST_OK maps=%d details=%s" % [_smoke_summary.size(), "; ".join(_smoke_summary)])
 		get_tree().quit(0)

@@ -20,8 +20,30 @@ from collections import defaultdict
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 RAW_CACHE = os.path.join(ROOT, "geodata", "karisidenan_madiun_wgs84.json")
+OSRM_CACHE_PATH = os.path.join(ROOT, "geodata", "madiun_osrm_roads_cache.json")
 OUT_JSON = os.path.join(ROOT, "data", "madiun_maps.json")
 TMP_GIS = "/tmp/madiun_gis"
+
+PROPOSED_BYPASS_OFFERS = {
+    "offer_ring_timur",
+    "offer_km_flyover",
+    "offer_km_ringtimur",
+    "offer_bypass_magetan",
+    "off_mg_ring",
+    "off_po_ring",
+}
+
+
+def load_osrm_cache():
+    if os.path.exists(OSRM_CACHE_PATH):
+        try:
+            return json.load(open(OSRM_CACHE_PATH, "r", encoding="utf-8")).get("edges", {})
+        except Exception:
+            return {}
+    return {}
+
+
+OSRM_EDGES = load_osrm_cache()
 
 
 def rdp(points, epsilon):
@@ -297,16 +319,237 @@ def curved_mid_points(p1, p2, bend=0.0):
     dx = p2[0] - p1[0]
     dy = p2[1] - p1[1]
     nx, ny = -dy, dx
-    p_mid = [round(mx + nx * bend, 1), round(my + ny * bend, 1)]
-    # 3-point quadratic sample
+    p_mid = [mx + nx * bend, my + ny * bend]
     out = [p1]
-    for t in (0.25, 0.5, 0.75):
+    for k in range(1, 8):
+        t = k / 8.0
         u = 1.0 - t
         bx = u * u * p1[0] + 2 * u * t * p_mid[0] + t * t * p2[0]
         by = u * u * p1[1] + 2 * u * t * p_mid[1] + t * t * p2[1]
         out.append([round(bx, 1), round(by, 1)])
     out.append(p2)
     return out
+
+
+def point_to_seg_dist(px, py, ax, ay, bx, by):
+    vx, vy = bx - ax, by - ay
+    l2 = vx * vx + vy * vy
+    if l2 < 1e-8:
+        return math.hypot(px - ax, py - ay)
+    t = max(0.0, min(1.0, ((px - ax) * vx + (py - ay) * vy) / l2))
+    return math.hypot(px - (ax + t * vx), py - (ay + t * vy))
+
+
+def chaikin_smooth(pts, passes=2):
+    """Convex-hull-preserving corner-cutting B-spline subdivision keeping exact endpoints."""
+    if len(pts) < 3:
+        return pts
+    cur = [[float(p[0]), float(p[1])] for p in pts]
+    for _ in range(passes):
+        if len(cur) < 3:
+            break
+        nxt = [cur[0]]
+        for i in range(len(cur) - 1):
+            a, b = cur[i], cur[i + 1]
+            if i > 0:
+                nxt.append([0.75 * a[0] + 0.25 * b[0], 0.75 * a[1] + 0.25 * b[1]])
+            else:
+                nxt.append([0.82 * a[0] + 0.18 * b[0], 0.82 * a[1] + 0.18 * b[1]])
+            if i < len(cur) - 2:
+                nxt.append([0.25 * a[0] + 0.75 * b[0], 0.25 * a[1] + 0.75 * b[1]])
+            else:
+                nxt.append([0.18 * a[0] + 0.82 * b[0], 0.18 * a[1] + 0.82 * b[1]])
+        nxt.append(cur[-1])
+        cur = nxt
+    simp = rdp(cur, 0.42)
+    return [[round(p[0], 1), round(p[1], 1)] for p in simp]
+
+
+def sanitize_control_polyline(pts, max_deg=56.0, passes=6):
+    """Relaxes sharp interior jogs (> max_deg) and collapses micro-segments before B-spline smoothing."""
+    if len(pts) < 3:
+        return pts
+    cur = [[float(p[0]), float(p[1])] for p in pts]
+    for _ in range(passes):
+        if len(cur) < 3:
+            break
+        # Merge interior vertices closer than 10px to neighbors
+        merged = [cur[0]]
+        for p in cur[1:-1]:
+            if math.hypot(p[0] - merged[-1][0], p[1] - merged[-1][1]) >= 10.0:
+                merged.append(p)
+        if len(merged) > 1 and math.hypot(cur[-1][0] - merged[-1][0], cur[-1][1] - merged[-1][1]) < 10.0:
+            merged.pop()
+        merged.append(cur[-1])
+        cur = merged
+        if len(cur) < 3:
+            break
+
+        changed = False
+        nxt = [cur[0]]
+        for i in range(1, len(cur) - 1):
+            ax, ay = cur[i - 1]
+            bx, by = cur[i]
+            cx, cy = cur[i + 1]
+            v1x, v1y = bx - ax, by - ay
+            v2x, v2y = cx - bx, cy - by
+            l1 = math.hypot(v1x, v1y)
+            l2 = math.hypot(v2x, v2y)
+            if l1 > 0.1 and l2 > 0.1:
+                cos_a = max(-1.0, min(1.0, (v1x * v2x + v1y * v2y) / (l1 * l2)))
+                ang = math.degrees(math.acos(cos_a))
+                if ang > max_deg:
+                    nxt.append([0.28 * ax + 0.44 * bx + 0.28 * cx, 0.28 * ay + 0.44 * by + 0.28 * cy])
+                    changed = True
+                    continue
+            nxt.append([bx, by])
+        nxt.append(cur[-1])
+        cur = nxt
+        if not changed:
+            break
+    return [[round(p[0], 1), round(p[1], 1)] for p in cur]
+
+
+def condition_osrm_polyline(raw_latlon, p1, p2, u_id, v_id, j_map, proj: Projector, bend: float, offer_id):
+    """Projects OSRM WGS84 road geometry, strips one-way hooks, guards unrelated junctions, and prepares control points."""
+    if offer_id in PROPOSED_BYPASS_OFFERS or not raw_latlon or len(raw_latlon) < 2:
+        return curved_mid_points(p1, p2, bend if abs(bend) > 0.02 else 0.06)
+
+    straight_d = math.hypot(p2[0] - p1[0], p2[1] - p1[1])
+    if straight_d < 16.0:
+        return [p1, p2]
+
+    ux = (p2[0] - p1[0]) / straight_d
+    uy = (p2[1] - p1[1]) / straight_d
+
+    proj_pts = [proj.proj(ll[0], ll[1]) for ll in raw_latlon]
+    proj_pts[0] = [p1[0], p1[1]]
+    proj_pts[-1] = [p2[0], p2[1]]
+
+    # 1. Strip GPS approach micro-hooks and one-way street overshoots near endpoints
+    stub_r = min(32.0, max(16.0, straight_d * 0.16))
+    filtered = [proj_pts[0]]
+    for pt in proj_pts[1:-1]:
+        d1 = math.hypot(pt[0] - p1[0], pt[1] - p1[1])
+        d2 = math.hypot(pt[0] - p2[0], pt[1] - p2[1])
+        if d1 < stub_r or d2 < stub_r:
+            continue
+        # Reject one-way U-turn overshoots behind p1 or past p2 on short/medium roads
+        along = (pt[0] - p1[0]) * ux + (pt[1] - p1[1]) * uy
+        if straight_d < 260.0 and (along < 6.0 or along > straight_d - 6.0):
+            continue
+        if math.hypot(pt[0] - filtered[-1][0], pt[1] - filtered[-1][1]) >= 11.0:
+            filtered.append(pt)
+    filtered.append(proj_pts[-1])
+
+    simp = rdp(filtered, 5.2)
+    raw_len = polyline_len(simp)
+
+    # 2. Guard excessive one-way block detours or routing directly over an unrelated junction
+    max_detour = 1.48 if straight_d < 165.0 else 2.05
+    if raw_len > straight_d * max_detour:
+        return curved_mid_points(p1, p2, bend)
+
+    # Reject paths that backtrack sharply against the chord on urban links
+    if straight_d < 220.0:
+        for i in range(len(simp) - 1):
+            seg_dx = simp[i + 1][0] - simp[i][0]
+            seg_dy = simp[i + 1][1] - simp[i][1]
+            seg_l = math.hypot(seg_dx, seg_dy)
+            if seg_l > 4.0 and (seg_dx * ux + seg_dy * uy) / seg_l < -0.25:
+                return curved_mid_points(p1, p2, bend)
+
+    other_js = [(j["x"], j["y"]) for jid, j in j_map.items() if jid != u_id and jid != v_id]
+    for i in range(len(simp) - 1):
+        ax, ay = simp[i]
+        bx, by = simp[i + 1]
+        for jx, jy in other_js:
+            d = point_to_seg_dist(jx, jy, ax, ay, bx, by)
+            if d < 12.5:
+                # OSRM routed right through another graph node; use clean direct/bent arc instead
+                return curved_mid_points(p1, p2, bend)
+
+    # Gently push interior points away if within 25px of an unrelated junction
+    adjusted = [simp[0]]
+    for pt in simp[1:-1]:
+        px, py = float(pt[0]), float(pt[1])
+        for jx, jy in other_js:
+            dx, dy = px - jx, py - jy
+            dist = math.hypot(dx, dy)
+            if 0.1 < dist < 25.0:
+                push = 25.5 - dist
+                px += (dx / dist) * push
+                py += (dy / dist) * push
+        adjusted.append([px, py])
+    adjusted.append(simp[-1])
+
+    return sanitize_control_polyline(adjusted, max_deg=56.0, passes=6)
+
+
+def separate_junction_arm_tangents(junctions, e_map):
+    """Ensures no two roads leave a junction along nearly identical tangents, then applies Chaikin smoothing."""
+    min_sep_rad = math.radians(25.0)
+    for j in junctions:
+        jid = j["id"]
+        jx, jy = float(j["x"]), float(j["y"])
+        eids = j["connectedEdgeIds"]
+        if len(eids) < 2:
+            continue
+        arms = []
+        for eid in eids:
+            r = e_map[eid]
+            pts = r["points"]
+            is_start = (r["from"] == jid)
+            other_pt = pts[1] if is_start else pts[-2]
+            ang = math.atan2(other_pt[1] - jy, other_pt[0] - jx)
+            arms.append([ang, eid, is_start])
+        arms.sort(key=lambda x: x[0])
+
+        # Iterative angular relaxation if two adjacent arms are < 25 deg apart
+        for _pass in range(4):
+            changed = False
+            n = len(arms)
+            for i in range(n):
+                a1 = arms[i]
+                a2 = arms[(i + 1) % n]
+                diff = a2[0] - a1[0]
+                if i == n - 1:
+                    diff += math.tau
+                if diff < min_sep_rad:
+                    nudge = (min_sep_rad - diff) * 0.52
+                    a1[0] -= nudge
+                    a2[0] += nudge
+                    changed = True
+            if not changed:
+                break
+
+        for ang, eid, is_start in arms:
+            r = e_map[eid]
+            pts = r["points"]
+            straight_d = math.hypot(pts[-1][0] - pts[0][0], pts[-1][1] - pts[0][1])
+            other_pt = pts[1] if is_start else pts[-2]
+            cur_ang = math.atan2(other_pt[1] - jy, other_pt[0] - jx)
+            delta = (ang - cur_ang + math.pi) % math.tau - math.pi
+            if abs(delta) > math.radians(2.5) and straight_d >= 44.0:
+                ctrl_d = min(28.0, straight_d * 0.25)
+                clear_r = ctrl_d * 1.45
+                cx = round(jx + math.cos(ang) * ctrl_d, 1)
+                cy = round(jy + math.sin(ang) * ctrl_d, 1)
+                # Strip ALL interior points within clear_r of (jx, jy) so inserting [cx, cy] NEVER creates a Z-fold!
+                if is_start:
+                    rem = [p for p in pts[1:-1] if math.hypot(p[0] - jx, p[1] - jy) >= clear_r]
+                    pts = [pts[0], [cx, cy]] + rem + [pts[-1]]
+                else:
+                    rem = [p for p in pts[1:-1] if math.hypot(p[0] - jx, p[1] - jy) >= clear_r]
+                    pts = [pts[0]] + rem + [[cx, cy], pts[-1]]
+                r["points"] = pts
+
+    # Final global pass: relax any sharp control corners and generate silky-smooth C1 Chaikin polylines!
+    for r in e_map.values():
+        ctrl_pts = sanitize_control_polyline(r["points"], max_deg=54.0, passes=6)
+        r["points"] = chaikin_smooth(ctrl_pts, passes=3)
+        r["lengthPx"] = polyline_len(r["points"])
+
 
 
 def populate_city_blocks(junctions, roads, facilities, seed=4242):
@@ -488,7 +731,7 @@ def make_facility(
     }
 
 
-def compile_graph(j_specs, e_specs, offer_specs, proj: Projector):
+def compile_graph(j_specs, e_specs, offer_specs, proj: Projector, map_id: str = ""):
     junctions = []
     j_map = {}
     for js in j_specs:
@@ -530,7 +773,9 @@ def compile_graph(j_specs, e_specs, offer_specs, proj: Projector):
         eid, name, u, v, rclass, reg_idx, lanes, bend, is_bridge, is_overpass, offer_id = es
         p1 = [j_map[u]["x"], j_map[u]["y"]]
         p2 = [j_map[v]["x"], j_map[v]["y"]]
-        pts = curved_mid_points(p1, p2, bend)
+        osrm_key = f"{map_id}:{eid}"
+        raw_ll = OSRM_EDGES.get(osrm_key)
+        pts = condition_osrm_polyline(raw_ll, p1, p2, u, v, j_map, proj, bend, offer_id)
         length = polyline_len(pts)
         r_obj = {
             "id": eid,
@@ -550,6 +795,8 @@ def compile_graph(j_specs, e_specs, offer_specs, proj: Projector):
             "closed": False,
             "isBridge": is_bridge,
             "isOverpass": is_overpass,
+            "bridgeSpans": [],
+            "overpassSpans": [],
             "isBuilt": offer_id is None,
             "offerId": offer_id,
             "congestionEMA": 0.0,
@@ -559,6 +806,8 @@ def compile_graph(j_specs, e_specs, offer_specs, proj: Projector):
         e_map[eid] = r_obj
         j_map[u]["connectedEdgeIds"].append(eid)
         j_map[v]["connectedEdgeIds"].append(eid)
+
+    separate_junction_arm_tangents(junctions, e_map)
 
     offers = []
     for ospec in offer_specs:
@@ -821,7 +1070,7 @@ def build_integrated_karisidenan_map(raw):
         ("offer_jls_pacitan", "Terusan JLS Pantai Barat Pacitan", "Jalur Lintas Selatan tepi tebing kars Donorojo langsung ke Pelabuhan Tamperan", "jls", ["e_offer_jls_barat"], 5, 4, 1),
     ]
 
-    junctions, roads, offers = compile_graph(j_specs, e_specs, offer_specs, proj)
+    junctions, roads, offers = compile_graph(j_specs, e_specs, offer_specs, proj, "karisidenan_madiun")
 
     facilities = [
         # Region 0: Kota Madiun (self-sufficient starter economy: Dot, Wedge, Block -> Capsule, Bar -> Stasiun Madiun!)
@@ -1044,7 +1293,7 @@ def build_kota_madiun_detail_map(raw):
         ("offer_km_ringtimur", "Ring Road Timur Madiun", "Sabuk logistik timur menghubungkan Pilangbango langsung ke Banjarejo", "ring", ["km_off2"], 1, 6, 1),
     ]
 
-    junctions, roads, offers = compile_graph(j_specs, e_specs, offer_specs, proj)
+    junctions, roads, offers = compile_graph(j_specs, e_specs, offer_specs, proj, "kota_madiun")
 
     facilities = [
         make_facility("km_f_tebu", "Kebun Tebu Pilangbango", "Supplier Hulu Kartoharjo Utara", "supplier", "raw", -7.6030, 111.5515, "km_pilangbango", 0, proj, output_good="dot", color="#4ea854"),
@@ -1131,7 +1380,7 @@ def build_single_regency_map(raw, rkey, map_id, title, subtitle, badge, desc, sc
             "holdSeconds": 0.0,
         })
 
-    junctions, roads, offers = compile_graph(j_specs, e_specs, offer_specs, proj)
+    junctions, roads, offers = compile_graph(j_specs, e_specs, offer_specs, proj, map_id)
     facilities = [
         make_facility(fs[0], fs[1], fs[2], fs[3], fs[4], fs[5], fs[6], fs[7], fs[8], proj, output_good=fs[9], accepted_goods=fs[10], color=fs[11])
         for fs in fac_specs
@@ -1542,21 +1791,126 @@ def build_all_maps():
             cleaned.pop()
         return cleaned
 
+    def find_polyline_crossing_spans(road_pts, target_lines_with_halfwidth, end_margin=16.0, bank_pad=4.0, min_span=16.0):
+        total_l = polyline_len(road_pts)
+        if total_l < end_margin * 2.0 + 8.0 or not target_lines_with_halfwidth:
+            return []
+        # Build cumulative lengths
+        cum = [0.0]
+        for i in range(len(road_pts) - 1):
+            cum.append(cum[-1] + math.hypot(road_pts[i + 1][0] - road_pts[i][0], road_pts[i + 1][1] - road_pts[i][1]))
+
+        step = 2.0
+        s = end_margin
+        hits = []
+        seg_idx = 0
+        while s <= total_l - end_margin:
+            while seg_idx < len(cum) - 2 and cum[seg_idx + 1] < s:
+                seg_idx += 1
+            seg_len = max(1e-6, cum[seg_idx + 1] - cum[seg_idx])
+            t = (s - cum[seg_idx]) / seg_len
+            px = road_pts[seg_idx][0] + t * (road_pts[seg_idx + 1][0] - road_pts[seg_idx][0])
+            py = road_pts[seg_idx][1] + t * (road_pts[seg_idx + 1][1] - road_pts[seg_idx][1])
+            crossed = False
+            for t_pts, hw in target_lines_with_halfwidth:
+                for k in range(len(t_pts) - 1):
+                    if point_to_seg_dist(px, py, t_pts[k][0], t_pts[k][1], t_pts[k + 1][0], t_pts[k + 1][1]) <= hw:
+                        crossed = True
+                        break
+                if crossed:
+                    break
+            if crossed:
+                hits.append(s)
+            s += step
+
+        if not hits:
+            return []
+        raw_spans = [[hits[0], hits[0]]]
+        for hs in hits[1:]:
+            if hs - raw_spans[-1][1] <= 16.0:
+                raw_spans[-1][1] = hs
+            else:
+                raw_spans.append([hs, hs])
+
+        final_spans = []
+        for a, b in raw_spans:
+            s0 = max(end_margin, a - bank_pad)
+            s1 = min(total_l - end_margin, b + bank_pad)
+            if s1 - s0 < min_span:
+                mid = 0.5 * (s0 + s1)
+                s0 = max(end_margin, mid - min_span * 0.5)
+                s1 = min(total_l - end_margin, mid + min_span * 0.5)
+            if s1 - s0 >= 10.0:
+                if final_spans and s0 - final_spans[-1][1] <= 12.0:
+                    final_spans[-1][1] = round(s1, 1)
+                else:
+                    final_spans.append([round(s0, 1), round(s1, 1)])
+        return final_spans
+
+    total_bridges = 0
+    total_overpasses = 0
     for m in maps:
         for reg in m["regions"]:
             reg["polygons"] = [r for r in (clean_ring(p) for p in reg["polygons"]) if len(r) >= 3]
         for wb in m["waterBodies"]:
             wb["polygon"] = clean_ring(wb["polygon"])
+        for rv in m["rivers"]:
+            rv["points"] = chaikin_smooth(rv["points"], passes=2)
+        for rw in m["railways"]:
+            rw["points"] = chaikin_smooth(rw["points"], passes=2)
+
+        river_targets = [(rv["points"], float(rv.get("widthPx", 16)) * 0.5 + 5.5) for rv in m["rivers"] if len(rv["points"]) >= 2]
+        rail_targets = [(rw["points"], 9.5) for rw in m["railways"] if len(rw["points"]) >= 2]
+
+        e_lookup = {r["id"]: r for r in m["roads"]}
+        for r in m["roads"]:
+            bspans = find_polyline_crossing_spans(r["points"], river_targets, end_margin=15.0, bank_pad=4.5, min_span=16.0)
+            r["bridgeSpans"] = bspans
+            r["isBridge"] = len(bspans) > 0
+            total_bridges += len(bspans)
+
+            if r.get("isOverpass") or r.get("roadClass") == "toll":
+                non_incident = list(rail_targets)
+                ru, rv_id = r["from"], r["to"]
+                for other in m["roads"]:
+                    if other["id"] == r["id"]:
+                        continue
+                    if other["from"] in (ru, rv_id) or other["to"] in (ru, rv_id):
+                        continue
+                    if other.get("roadClass") == "toll" and r.get("roadClass") != "toll":
+                        continue
+                    non_incident.append((other["points"], 10.5))
+                ospans = find_polyline_crossing_spans(r["points"], non_incident, end_margin=18.0, bank_pad=6.0, min_span=20.0)
+                # Keep away from river bridge spans so bridge and overpass parapets don't overlap
+                filtered_ospans = []
+                for oa, ob in ospans:
+                    if not any(not (ob < ba - 6.0 or oa > bb + 6.0) for ba, bb in bspans):
+                        filtered_ospans.append([oa, ob])
+                r["overpassSpans"] = filtered_ospans
+                r["isOverpass"] = len(filtered_ospans) > 0
+                total_overpasses += len(filtered_ospans)
+            else:
+                r["overpassSpans"] = []
+                r["isOverpass"] = False
+
+        for off in m["roadOffers"]:
+            off["lengthPx"] = round(sum(e_lookup[eid]["lengthPx"] for eid in off["edgeIds"]), 1)
+            b_px = sum((s1 - s0) for eid in off["edgeIds"] for s0, s1 in e_lookup[eid]["bridgeSpans"])
+            off["bridgeSpanPx"] = round(b_px, 1)
 
     os.makedirs(os.path.dirname(OUT_JSON), exist_ok=True)
     payload = json.dumps({"version": 1, "maps": maps}, separators=(",", ":"))
     with open(OUT_JSON, "w", encoding="utf-8") as fp:
         fp.write(payload)
 
-    print(f"Generated {len(maps)} maps into {OUT_JSON} ({len(payload) // 1024} KB):")
+    print(f"Generated {len(maps)} maps into {OUT_JSON} ({len(payload) // 1024} KB) [river_bridges={total_bridges}, overpasses={total_overpasses}]:")
     for m in maps:
-        print(f"  - {m['id']:20s}: {len(m['regions'])} regions, {len(m['junctions'])} junctions, {len(m['roads'])} roads, {len(m['facilities'])} facilities, {len(m['buildings'])} 2.5D buildings")
+        nb = sum(len(r["bridgeSpans"]) for r in m["roads"])
+        no = sum(len(r["overpassSpans"]) for r in m["roads"])
+        avg_pts = sum(len(r["points"]) for r in m["roads"]) / max(1, len(m["roads"]))
+        print(f"  - {m['id']:20s}: {len(m['regions'])} regions, {len(m['junctions'])} junctions, {len(m['roads'])} roads (avg {avg_pts:.1f} pts, {nb} bridges, {no} overpasses), {len(m['facilities'])} facilities")
 
 
 if __name__ == "__main__":
     build_all_maps()
+

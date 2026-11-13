@@ -912,7 +912,12 @@ func _process(delta: float) -> void:
 			_update_facility_live_widgets()
 
 func show_toast_banner(msg: String, duration: float = 2.6) -> void:
-	if msg == "" or (_modal_panel != null and _modal_panel.visible):
+	if msg == "":
+		if _banner_panel != null:
+			_banner_panel.visible = false
+		_banner_timer = 0.0
+		return
+	if _modal_panel != null and _modal_panel.visible:
 		return
 	_banner_label.text = msg
 	_banner_panel.visible = true
@@ -2327,7 +2332,11 @@ func _build_overview_options_tab() -> void:
 	chk_lht.focus_mode = Control.FOCUS_NONE
 	chk_lht.text = "Left-hand traffic (Indonesian National Road Standard)"
 	chk_lht.set_pressed_no_signal(sim.left_hand_traffic)
-	chk_lht.toggled.connect(func(on: bool): sim.left_hand_traffic = on)
+	chk_lht.toggled.connect(func(on: bool):
+		sim.left_hand_traffic = on
+		sim._refresh_network_geometry()
+		sim.map_static_dirty.emit()
+	)
 	o_col.add_child(chk_lht)
 
 	var chk_dark := CheckBox.new()

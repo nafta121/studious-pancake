@@ -69,6 +69,7 @@ echo "==> [4/5] Importing project & exporting signed Godot 4.7.2 Android APK..."
 
 echo "==> [5/5] Applying full v1/v2/v3 cryptographic signatures & verifying APK..."
 apksigner sign \
+  --min-sdk-version 21 \
   --ks "${KEYSTORE_PATH}" \
   --ks-key-alias "${KEYSTORE_USER}" \
   --ks-pass "pass:${KEYSTORE_PASS}" \
