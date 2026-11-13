@@ -20,6 +20,18 @@ const COLOR_GRASS := Color("#C9D8A6")
 const COLOR_PARK_DEEP := Color("#6F9A52")
 const COLOR_SHADOW := Color("#363D55")
 
+const STARTING_CASH := 500
+const GOAL_HOLD_SEC := 60.0
+const MARKET_DEMAND_WINDOW := 60.0
+const MARKET_DEMAND_RISE := 30.0
+const MARKET_DEMAND_FULL := 15.0
+const MARKET_DEMAND_FADE := 60.0
+const MARKET_DEMAND_SPAN := 105.0 # 30s rise + 15s plateau + 60s fade = 105s trapezoidal kernel
+const ROAD_OFFER_SCALE := 0.88
+const ROAD_OFFER_INFLATION := 1.2
+const MAX_BOOMTOWN_LEVELS := 10
+const BOOM_STEP_PER_MIN := 3.0
+
 const INFRA_PRICES := {
 	"light": 1000,
 	"roundabout": 10000,
@@ -27,7 +39,7 @@ const INFRA_PRICES := {
 	"lane_base": 500,
 	"lane_per_px": 5,
 	"pocket": 1125,
-	"close_street": 3200,
+	"close_street": 0,
 }
 
 const POCKET_SIZES_ORIG: Array[float] = [0.0, 130.0, 260.0, 410.0]
@@ -46,6 +58,7 @@ const ROUTE_PALETTE: Array[Color] = [
 
 const FACTORY_SPEED_SHAPES_PER_MIN: Array[int] = [8, 10, 12, 14, 16, 18, 22, 26, 30, 36, 42, 50, 60]
 const BUFFER_CAPACITIES: Array[int] = [4, 8, 15, 30, 60]
+const HARBOUR_CAPACITIES: Array[int] = [40, 60, 80, 100]
 # Authentic Industry._BRil6kGd1pA5 timetable wait factors (Lv.3 = 0.0 wait!)
 const TIMETABLE_WAIT_FACTORS: Array[float] = [1.0, 0.6, 0.3, 0.0]
 
@@ -624,3 +637,19 @@ static func parse_color(raw: String, fallback: Color = Color("#ebe4d5")) -> Colo
 		if inner3.size() == 3:
 			return Color(float(inner3[0]) / 255.0, float(inner3[1]) / 255.0, float(inner3[2]) / 255.0, 1.0)
 	return Color.from_string(s, fallback)
+
+## Authentic `Boomtown.lot_limit(good)` (`boomtown.gd:L87-91`): max sustainable units/min per factory lot before spawning a reserve `boom_lot`.
+static func lot_limit(good_id: String) -> float:
+	if not GOODS.has(good_id):
+		return 30.0
+	var g: Dictionary = GOODS[good_id]
+	var ins: Array = g.get("inputs", [])
+	if ins.is_empty():
+		return 85.0
+	var io_slots: int = maxi(1, int(g.get("slots", 1)))
+	for inp in ins:
+		var ig := String(inp["good"])
+		var islots: int = maxi(1, int(GOODS.get(ig, {"slots": 1})["slots"]))
+		io_slots += int(inp["qty"]) * islots
+	return 85.0 / float(maxi(1, io_slots))
+

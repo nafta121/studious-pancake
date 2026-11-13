@@ -1184,3 +1184,145 @@ static func hit_test_road(roads: Array, unlocked_regions: Dictionary, world_p: V
 				best_d = d
 				best = r
 	return best
+
+
+static func sample_polyline_pose_clamped(pts: PackedVector2Array, cum_len: PackedFloat32Array, s_px: float) -> Dictionary:
+	if pts.is_empty():
+		return {"pos": Vector2.ZERO, "angle": 0.0, "dir": Vector2.RIGHT}
+	if pts.size() == 1 or cum_len.is_empty():
+		return {"pos": pts[0], "angle": 0.0, "dir": Vector2.RIGHT}
+	var total: float = cum_len[cum_len.size() - 1]
+	if s_px < 0.0:
+		var d0: Vector2 = (pts[1] - pts[0]).normalized()
+		if d0.length_squared() < 0.001:
+			d0 = Vector2.RIGHT
+		return {"pos": pts[0] + d0 * s_px, "angle": atan2(d0.y, d0.x), "dir": d0}
+	if s_px > total:
+		var n: int = pts.size()
+		var d1: Vector2 = (pts[n - 1] - pts[n - 2]).normalized()
+		if d1.length_squared() < 0.001:
+			d1 = Vector2.RIGHT
+		return {"pos": pts[n - 1] + d1 * (s_px - total), "angle": atan2(d1.y, d1.x), "dir": d1}
+	var raw: Dictionary = sample_polyline_raw(pts, cum_len, s_px)
+	var dr: Vector2 = raw["dir"]
+	return {"pos": raw["pos"], "angle": atan2(dr.y, dr.x), "dir": dr}
+
+
+static func min_polyline_distance(a: PackedVector2Array, b: PackedVector2Array) -> float:
+	if a.is_empty() or b.is_empty():
+		return INF
+	var best: float = INF
+	for i in range(a.size() - 1):
+		var a0: Vector2 = a[i]
+		var a1: Vector2 = a[i + 1]
+		for k in range(b.size() - 1):
+			var b0: Vector2 = b[k]
+			var b1: Vector2 = b[k + 1]
+			if Geometry2D.segment_intersects_segment(a0, a1, b0, b1) != null:
+				return 0.0
+			best = minf(best, point_to_segment_dist(a0, b0, b1))
+			best = minf(best, point_to_segment_dist(b0, a0, a1))
+		best = minf(best, point_to_segment_dist(a[a.size() - 1], b[0], b[b.size() - 1]))
+	return best
+
+
+## Authentic pairwise junction & roundabout movement `conflict_zones` check (`CROSS`, `MERGE`, `DIVERGE`).
+static func movements_conflict(
+	j: Dictionary,
+	a_pts: PackedVector2Array,
+	a_in_road: String,
+	a_out_road: String,
+	a_out_lane: int,
+	b_pts: PackedVector2Array,
+	b_in_road: String,
+	b_out_road: String,
+	b_out_lane: int
+) -> bool:
+	# Identical exit road + identical exit lane => MERGE conflict
+	if a_out_road != "" and a_out_road == b_out_road and a_out_lane == b_out_lane:
+		return true
+	# Same incoming road on parallel distinct lanes going to same road on distinct lanes => non-conflicting parallel turn!
+	if a_in_road != "" and a_in_road == b_in_road and a_out_road == b_out_road and a_out_lane != b_out_lane:
+		return false
+	if a_pts.size() >= 2 and b_pts.size() >= 2:
+		var clearance: float = LANE_SEPARATION * 0.84
+		var geom: Dictionary = j.get("geom", {})
+		if String(geom.get("kind", "")) == "roundabout2":
+			clearance = LANE_SEPARATION * 0.72
+		return min_polyline_distance(a_pts, b_pts) < clearance
+	# Fallback conservative check if turn connector pts unavailable
+	return a_in_road != b_in_road or a_out_road == b_out_road
+
+
+## Authentic `CityRebuild` (`city_rebuild.gd`): trims, slides back, or demolishes `sim.buildings`
+## whenever roads are widened, Road Offers are built, ExitRoads are added, or Roundabouts expand.
+static func rebuild_city_buildings_around_roads(buildings: Array, roads: Array, junctions: Array) -> int:
+	var touched: int = 0
+	var active_roads: Array = []
+	for r in roads:
+		if bool(r.get("isBuilt", true)) and not bool(r.get("closed", false)):
+			active_roads.append(r)
+
+	for b in buildings:
+		if bool(b.get("demolished", false)):
+			continue
+		if not b.has("origX"):
+			b["origX"] = float(b["x"])
+			b["origY"] = float(b["y"])
+			b["origW"] = float(b["w"])
+			b["origD"] = float(b["d"])
+		var bp := Vector2(float(b["x"]), float(b["y"]))
+		var rad_b: float = 0.5 * maxf(float(b["w"]), float(b["d"]))
+
+		# 1. Check Roundabout & large plaza clearance
+		var max_pen: float = 0.0
+		var push_vec := Vector2.ZERO
+		for j in junctions:
+			var geom: Dictionary = j.get("geom", {})
+			var r_out: float = float(geom.get("r_outer", 0.0))
+			if r_out <= 6.0:
+				continue
+			var jp: Vector2 = j["pos"]
+			var req: float = r_out + 1.8 + rad_b * 0.78
+			var dist: float = bp.distance_to(jp)
+			if dist < req:
+				var pen: float = req - dist
+				if pen > max_pen:
+					max_pen = pen
+					push_vec = (bp - jp).normalized() if dist > 0.1 else Vector2.UP
+
+		# 2. Check widened road / built offer / exit slip clearance
+		for r in active_roads:
+			var pts: PackedVector2Array = r["pts"]
+			if pts.size() < 2:
+				continue
+			var half_road: float = float(r.get("widthPx", 12.0)) * 0.5 + 1.5
+			var req_r: float = half_road + rad_b * 0.72
+			for i in range(pts.size() - 1):
+				var cp: Vector2 = Geometry2D.get_closest_point_to_segment(bp, pts[i], pts[i + 1])
+				var dist_r: float = bp.distance_to(cp)
+				if dist_r < req_r:
+					var pen_r: float = req_r - dist_r
+					if pen_r > max_pen:
+						max_pen = pen_r
+						push_vec = (bp - cp).normalized() if dist_r > 0.1 else Vector2(0.0, -1.0)
+
+		if max_pen <= 0.15:
+			continue
+		touched += 1
+		if max_pen <= 2.4 and float(b["d"]) > 7.5:
+			# Shallow trim
+			b["d"] = maxf(6.0, float(b["d"]) - max_pen * 0.85)
+			var slide_s: Vector2 = bp + push_vec * (max_pen * 0.65)
+			b["x"] = slide_s.x
+			b["y"] = slide_s.y
+		elif max_pen <= 8.5:
+			# Slide building back away from widened curb
+			var slide_p: Vector2 = bp + push_vec * (max_pen + 0.8)
+			b["x"] = slide_p.x
+			b["y"] = slide_p.y
+		else:
+			# Deep encroachment inside new corridor or roundabout -> demolish cleanly
+			b["demolished"] = true
+	return touched
+

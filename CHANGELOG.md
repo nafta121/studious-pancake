@@ -4,7 +4,7 @@ Seluruh perubahan penting pada rilis APK Android (`id.madiun.incrementaltraffic`
 
 ## 🔐 Jaminan Kontinuitas Sertifikat Penandatanganan APK (*Signing Certificate Continuity*)
 
-Agar pengguna Android dapat melakukan **pembaruan langsung (*in-place update* / `adb install -r`)** tanpa perlu menghapus instalasi lama atau kehilangan data simpanan permainan (`user://save_<map_id>.json`), seluruh rilis mulai `v1.1.0-madiun`, `v1.2.0-madiun`, `v1.3.0-madiun`, `v1.4.0-madiun`, hingga `v1.5.0-madiun` dan rilis-rilis berikutnya dikunci menggunakan *keystore* rilis tetap (`signing/madiun_godot_release.keystore`) dengan validasi otomatis pada [`scripts/build_android_apk.sh`](scripts/build_android_apk.sh):
+Agar pengguna Android dapat melakukan **pembaruan langsung (*in-place update* / `adb install -r`)** tanpa perlu menghapus instalasi lama atau kehilangan data simpanan permainan (`user://save_<map_id>.json`), seluruh rilis mulai `v1.1.0-madiun`, `v1.2.0-madiun`, `v1.3.0-madiun`, `v1.4.0-madiun`, `v1.5.0-madiun`, hingga `v1.6.0-madiun` dan rilis-rilis berikutnya dikunci menggunakan *keystore* rilis tetap (`signing/madiun_godot_release.keystore`) dengan validasi otomatis pada [`scripts/build_android_apk.sh`](scripts/build_android_apk.sh):
 
 | Atribut Sertifikat | Nilai Terkunci |
 | :--- | :--- |
@@ -16,7 +16,34 @@ Agar pengguna Android dapat melakukan **pembaruan langsung (*in-place update* / 
 | **Certificate SHA-1 Digest** | `4a10248317724b7f363d92c9874c5c521ef98808` |
 | **Masa Berlaku** | `2026-11-13` s/d `2054-03-31` |
 
-> **Catatan Pembaruan**: Jika Anda sebelumnya memasang `v1.1.0-madiun` s/d `v1.4.0-madiun`, Anda dapat langsung mengunduh dan memasang `v1.5.0-madiun` di atasnya tanpa *uninstall* (skema simpanan `v: 2` otomatis dimigrasikan ke `v: 3`).
+> **Catatan Pembaruan**: Jika Anda sebelumnya memasang `v1.1.0-madiun` s/d `v1.5.0-madiun`, Anda dapat langsung mengunduh dan memasang `v1.6.0-madiun` di atasnya tanpa *uninstall* (skema simpanan lama `v: 2` / `v: 3` otomatis dimigrasikan ke multi-slot atomik `RunSave v: 4`).
+
+---
+
+## [`v1.6.0-madiun`] — `versionCode: 160`
+
+- **Berkas APK**: [`incremental-traffic-madiun-android.apk`](releases/incremental-traffic-madiun-android.apk) (`28.371.560 byte` / `27,1 MB`, `arm64-v8a`, Android 7.0+ `minSdk: 24`, `212` berkas terpaket)
+- **APK SHA-256**: `de6e6fde62c41f0f74e5e4b9df0988a80c160f87db209f2580ca4f6a9443bd57`
+- **Certificate Serial / SHA-256**: `5071a11bb51cc4dc` / `7bae8ba2a722a2168c38f3faaf0a3d61df57b32700cefdf2041fd59fbf4981ce` (identik dengan `v1.1.0-madiun` – `v1.5.0-madiun`)
+
+### 🚦 Sinkronisasi Penuh 4 Pilar Inti *Incremental Traffic* `v1.4.1` (`v1.6.0`)
+1. **Fisika Lalu Lintas Mikro, Lot Parkir Fisik (`ParkingSpace`) & Jalan Keluar (`ExitRoads`) (`parking_lot.gd`, `sim_engine.gd`, `road_geom.gd`, `map_view_25d.gd`)**:
+   - **Eliminasi *Ghost-Driving* Anti-Stuck**: Menghapus mekanisme tembus-tabrakan lama setelah tunggu lama, sehingga antrean macet nyata terbentuk secara organik dan diagnosis *Gridlock* bekerja seperti `SimCore` asli.
+   - **Pengereman Kinematik Lintas Segmen & Zona Konflik Simpang/Bundaran**: Kendaraan memindai ruang bebas hingga `2–3` segmen ke depan (`v²/(2·decel)`), menghormati celah `2,2s` bundaran serta matriks konflik belok `RoadGeom.movements_conflict` pada simpang `Yield` dan belok kiri lawan arus di lampu hijau.
+   - **Halaman Parkir Fisik `ParkingSpace` (`8` Bay) & `wideGate`**: Setiap pabrik, pemasok, pasar, stasiun, dan pelabuhan kini memiliki apron aspal fisik dengan `1..4` teluk parkir luar ruang + bangunan garasi beratap metal bergelombang (`5..8` teluk dalam ruang), manuver kurva Bezier masuk/mundur/keluar nyata per truk, serta gerbang ganda simultan (`wideGate` saat `bays >= 5`) dengan antrean masuk fasilitas.
+   - **Jalan Keluar Fisik (`ExitRoads`) & `CityRebuild`**: Opsi pembelian akses satu arah keluar terpisah seharga `$20.000` (beserta penjualan kembali `Sell (+$10k)` / pengembalian dana `50%`) yang memisahkan arus keluar truk ke ruas jalan belakang/samping dan merelokasi otomatis bangunan kota sekitar jalan baru (`CityRebuild`).
+2. **Kereta Api & Kapal Aktif + Palang Perlintasan Sebidang & Jembatan Angkat *Bascule* (`transport_sim.gd`, `sim_engine.gd`, `map_view_25d.gd`, `sfx_synth.gd`)**:
+   - **Layanan Kereta Api Aktif (`TrainService`) & Palang Perlintasan Otomatis**: Lokomotif diesel + rangkaian gerbong kargo melintasi rel peta secara terjadwal (`110 dtk`), singgah di Stasiun untuk mengangkut tumpukan `yardPile` (`2,0×`), dan memicu palang pintu perlintasan sebidang otomatis (`5,0 dtk` peringatan awal + lampu merah berkedip ganda + dentang lonceng `crossing_bell`) yang menghentikan truk di garis henti rel.
+   - **Layanan Kapal Kargo (`ShipService`), Tongkang Sungai & Jembatan Angkat *Bascule***: Kapal kargo samudra bersandar di Pelabuhan (`1,6×`) dan tongkang sungai berlayar di alur Bengawan Solo / Kali Madiun; jembatan sungai pelayaran bertransformasi menjadi jembatan angkat *bascule* 2.5D dengan menara penyeimbang dan daun dek terangkat yang menahan lalu lintas jalan saat kapal melintas.
+3. **Presisi Rumus Ekonomi, Gudang & *Boomtown* 10-Level (`catalog.gd`, `sim_engine.gd`, `android_hud.gd`)**:
+   - **Modal Awal `$500`, Penutupan Jalan `$0` & Harga Lajur Per-Arah**: Menyelaraskan kas awal permainan ke `$500` (`STARTING_CASH = 500`), penutupan jalan gratis (`close_street = $0`), serta pembelian/pengembalian `50%` lajur dihitung per arah (`Dir: Fwd` / `Back` = `1×`, `Both` = `2×`).
+   - **Inflasi Penawaran Jalan Baru (`0.88 × 1.2^n`) & Eksklusi Bentrok**: Penawaran pintasan jalan baru mengalami inflasi `1,2^n` setiap pembelian jalan baru dan otomatis mengecualikan kandidat ruas yang berpotongan terlalu dekat dengan jalan aktif.
+   - **Kapasitas Integer Komoditas `2`-Slot & Bongkar Muat Parsial Unit-demi-Unit**: Memperbaiki kapasitas efektif gudang input untuk komoditas ukuran `2`-slot (`int(cap / 2)`, mis. `15 / 2 = 7` unit) serta bongkar muat bertahap `0,55 dtk/unit` agar truk dapat membongkar sebagian muatan yang muat dan menunggu sisa ruang tanpa kehilangan kargo.
+   - **Kernel Trapesium `MarketDemand` `105 dtk` & *Boomtown* `10`-Level + `CityBoom`**: Menghitung laju pengiriman pasar menggunakan jendela trapesium mulus `105 dtk` (`15 dtk` *ramp-in* + `60 dtk` penuh + `30 dtk` ekor), menahan syarat kelulusan target selama `GOAL_HOLD_SEC = 60 dtk`, serta menghadirkan fase akhir **Boomtown Level 1–10** (`+3,0 / mnt` per level) yang memicu pemadatan gedung tinggi `CityBoom` dan pertumbuhan populasi kota.
+4. **Alur Stage, Sinematik Wilayah & Mixer Audio 5-Kanal Asli (`stage_overlays.gd`, `world_shows.gd`, `touch_camera.gd`, `sfx_synth.gd`, `main_game.gd`)**:
+   - **Alur Stage Penuh (`TitleStage` → `LoadingRoundabout` → `PauseMenu` / `SaveLoadMenu`)**: Layar judul dengan kamera mengorbit kota hidup, pemilih ke-7 peta Karesidenan Madiun berpratinjau minimap vektor `CityPreview` + kode peta Base-32 `CityCode` yang dapat disalin/ditempel, transisi bundaran berputar `18` truk warna-warni (`LoadingRoundabout`), serta menu jeda (`☰`) dengan **3 slot simpanan atomik `RunSave v4`** (`.tmp` → `.bak` → `.json` + *autosave*).
+   - **Gerbang Wilayah Interaktif (`RegionGate`) & Sinematik `UnlockShow` / `BoomShow` / `RoadShow`**: Plang gerbang kunci berdenyut di batas wilayah terkunci lengkap dengan penunjuk tepi layar (*off-screen pointer*), terbang kamera sinematik `fly_to_world`, semburan `170` konfeti warna-warni + kartu `RegionOpenPopup` saat wilayah baru terbuka, kembang api `BoomShow` saat naik level *Boomtown*, serta animasi hamparan segmen jalan baru `RoadShow`.
+   - **Plang Penawaran Jalan di Peta (`RoadOfferSigns`), `RoadReroutePanel` & Audio 5-Kanal**: Menampilkan `6` lencana penawaran jalan terbaik langsung di atas peta, panel konfirmasi pengalihan rute terdampak (`RoadReroutePanel`) dan spanduk peringatan rute putus (`BrokenRouteBanner`), serta synthesizer efek suara baru (`crossing_bell`, `train_depart`, `ship_horn`, `firework_pop`, `truck_honk`, *city ambience*) dengan mixer **5 kanal independen** (`Master`, `SFX`, `UI`, `Deliveries`, `Ambience`).
 
 ---
 

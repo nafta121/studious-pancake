@@ -54,6 +54,7 @@ var editing_return_waypoints: bool = false
 var route_draft_from_id: String = ""
 var active_tool: String = "pan"
 var hidden_route_ids: Dictionary = {} # route_id -> true (for OverlayBar Network filter)
+var interactive_gate_handled: bool = false
 
 var _terrain_node: _StaticBatchLayer
 var _water_node: _StaticBatchLayer
@@ -539,6 +540,7 @@ func _rebuild_static_batches() -> void:
 	_build_roads_and_junctions_batches(is_dark)
 
 	# 7. Town Houses & Commercial Blocks via authentic `city_building.gdshader` + `city_shadow.gdshader`
+	#    Honors `CityRebuild` (`demolished`), per-building `roofColor` / `wallColor`, and `CityBoom` (`lastGrowSec`)!
 	var skip_minor_houses: bool = perf_preset == "battery"
 	var use_shadows: bool = perf_preset != "battery"
 	var sh_target: TriBatch2D = _shadow_batch if use_shadows else null
@@ -549,18 +551,35 @@ func _rebuild_static_batches() -> void:
 	var b_idx: int = 0
 	for b in sim.buildings:
 		b_idx += 1
+		if bool(b.get("demolished", false)):
+			continue
 		if skip_minor_houses and (b_idx % 2 == 1) and String(b["kind"]) == "house":
 			continue
 		var b_reg: int = int(b["regionIndex"])
 		var b_unl: bool = sim.unlocked_regions.has(b_reg)
 		var b_pos := Vector2(float(b["x"]), float(b["y"]))
 		var r_col: Color = town_roofs[b_idx % town_roofs.size()]
-		var w_col := Color("E4DFD3") if not is_dark else Color("3B404C")
+		if b.has("roofColor") and String(b["roofColor"]) != "":
+			r_col = GameCatalog.parse_color(String(b["roofColor"]), r_col)
+		var w_col := Color("E4DFD3")
+		if b.has("wallColor") and String(b["wallColor"]) != "":
+			w_col = GameCatalog.parse_color(String(b["wallColor"]), w_col)
+		if is_dark:
+			r_col = r_col.darkened(0.32)
+			w_col = w_col.darkened(0.68)
 		if not b_unl:
 			r_col = r_col.lerp(COL_BG, 0.65)
 			w_col = w_col.lerp(COL_BG, 0.65)
-		var win_seed: float = (0.14 + fmod(float(b_idx) * 0.173, 0.82)) if b_unl else 0.0
-		var rev_c0: Color = _compute_region_reveal_c0(b_reg, b_pos) if b_unl else Color(0.0, b_pos.x, b_pos.y, 0.0)
+		var night_on_seed: float = float(b.get("nightOn", 0.14 + fmod(float(b_idx) * 0.173, 0.82)))
+		var win_seed: float = clampf(night_on_seed, 0.05, 0.96) if b_unl else 0.0
+		var b_grow: float = float(b.get("lastGrowSec", -999.0))
+		var rev_c0: Color
+		if b_unl and b_grow > 0.0:
+			rev_c0 = Color(b_grow, b_pos.x, b_pos.y, -1.72)
+		elif b_unl:
+			rev_c0 = _compute_region_reveal_c0(b_reg, b_pos)
+		else:
+			rev_c0 = Color(0.0, b_pos.x, b_pos.y, 0.0)
 		_building_batch.add_city_building_25d(
 			b_pos,
 			float(b["w"]),
@@ -574,7 +593,7 @@ func _rebuild_static_batches() -> void:
 			sh_target if b_unl else null
 		)
 
-	# 8. Industrial Facilities (FactoryLook + Concrete Storage Beds + elastic GROW_GLOW when upgraded!)
+	# 8. Industrial Facilities (Physical `ParkingSpace` Apron + `wideGate` + Indoor `garage` Bays 5..8 + `ExitRoad` Slip Gate)
 	var pad_fill_col := Color("2F3440") if is_dark else Color("E6E2D8")
 	var pad_dash_col := Color("585E6B") if is_dark else Color("A9A59A")
 	var f_idx: int = 0
@@ -585,22 +604,69 @@ func _rebuild_static_batches() -> void:
 		var fp: Vector2 = f["pos"]
 		var fk := String(f["kind"])
 		var exp_scale: float = 1.24 if int(f["upgrades"].get("expand", 0)) > 0 else 1.0
+		var lot: Dictionary = f.get("parkingLot", {})
 
 		var lot_col := Color("DCD8CE") if not is_dark else Color("2E333E")
 		var apron_col := Color("343741") if not is_dark else Color("23262F")
+		var curb_lot_col := Color("A9A59B") if not is_dark else Color("181B22")
 		if not f_unl:
 			lot_col.a = 0.35
 			apron_col.a = 0.32
+			curb_lot_col.a = 0.32
 		_terrain_batch.add_rect_rot(fp + Vector2(0, 2.5), 45.0 * exp_scale, 30.0 * exp_scale, 0.0, lot_col)
-		_terrain_batch.add_rect_rot(fp + Vector2(0, 10.5 * exp_scale), 28.0 * exp_scale, 11.0 * exp_scale, 0.0, apron_col)
-		if f_unl:
-			var bays_vis: int = clampi(sim.get_total_bays(f), 1, 8)
-			for bi in range(bays_vis + 1):
-				var bx: float = fp.x - 11.0 * exp_scale + (22.0 * exp_scale) * (float(bi) / float(maxi(1, bays_vis)))
-				_terrain_batch.add_polyline(
-					PackedVector2Array([Vector2(bx, fp.y + 6.5 * exp_scale), Vector2(bx, fp.y + 14.5 * exp_scale)]),
-					1.0, Color(COL_LANE_MARK, 0.72), false, false
-				)
+
+		var apron_c: Vector2 = lot.get("apronCenter", fp + Vector2(0, 10.6 * exp_scale))
+		var apron_sz: Vector2 = lot.get("apronSize", Vector2(29.0 * exp_scale, 11.6 * exp_scale))
+		_terrain_batch.add_rect_rot(apron_c, apron_sz.x + 1.8, apron_sz.y + 1.8, 0.0, curb_lot_col)
+		_terrain_batch.add_rect_rot(apron_c, apron_sz.x, apron_sz.y, 0.0, apron_col)
+
+		if f_unl and not lot.is_empty():
+			# Physical Gate Throat (`wideGate` 2-lane vs single-lane turn-taking)
+			var drv_pts: PackedVector2Array = lot.get("drivewayPts", PackedVector2Array())
+			var drv_w: float = float(lot.get("drivewayWidth", 5.8 * exp_scale))
+			if drv_pts.size() >= 2:
+				_terrain_batch.add_smooth_strip(drv_pts, drv_w + 1.6, curb_lot_col, false, true)
+				_terrain_batch.add_smooth_strip(drv_pts, drv_w, apron_col, false, true)
+				if bool(lot.get("wideGate", false)):
+					_terrain_batch.add_dashed_polyline(drv_pts, 0.85, Color(COL_LANE_MARK, 0.80), 2.4, 2.0, 0.0)
+				# Gate threshold bar
+				var g_base: Vector2 = lot.get("gateBase", apron_c + Vector2(0, apron_sz.y * 0.48))
+				var g_col_mark := Color("F2B630", 0.88) if bool(lot.get("hasExitRoad", false)) else Color(COL_LANE_MARK, 0.72)
+				_terrain_batch.add_rect_rot(g_base, drv_w * 0.90, 0.9, 0.0, g_col_mark)
+
+			# Rear One-Way Slip Gate (`ExitRoad`) connecting apron to `farGatePos`
+			if bool(lot.get("hasExitRoad", false)):
+				var far_g: Vector2 = lot.get("farGatePos", fp + Vector2(15.0 * exp_scale, 3.2 * exp_scale))
+				var slip_pts := PackedVector2Array([apron_c + Vector2((far_g.x - apron_c.x) * 0.35, -1.5 * exp_scale), far_g])
+				_terrain_batch.add_smooth_strip(slip_pts, 5.2 * exp_scale, apron_col, false, true)
+				var sl_dir: Vector2 = (far_g - slip_pts[0]).normalized()
+				var sl_n := Vector2(-sl_dir.y, sl_dir.x)
+				var sl_mid: Vector2 = slip_pts[0].lerp(far_g, 0.58)
+				_terrain_batch.add_tri(sl_mid + sl_dir * 2.2, sl_mid - sl_dir * 1.2 - sl_n * 1.4, sl_mid - sl_dir * 1.2 + sl_n * 1.4, Color("F2B630", 0.92))
+
+			# Outdoor Stalls `1..4` (`not bay["indoor"]`) + Indoor `garage` Portals `5..8` (`bay["indoor"]`)
+			var mark_stall := Color(COL_LANE_MARK, 0.78)
+			for bay in lot.get("bays", []):
+				var b_pos_s: Vector2 = bay["pos"]
+				var b_ang_s: float = float(bay["angle"])
+				var ux_s := Vector2(cos(b_ang_s), sin(b_ang_s))
+				var uy_s := Vector2(-ux_s.y, ux_s.x)
+				if not bool(bay.get("indoor", false)):
+					var hl_s: float = 3.2 * exp_scale
+					var hw_s: float = 1.95 * exp_scale
+					var u_box := PackedVector2Array([
+						b_pos_s - ux_s * hl_s - uy_s * hw_s,
+						b_pos_s + ux_s * hl_s - uy_s * hw_s,
+						b_pos_s + ux_s * hl_s + uy_s * hw_s,
+						b_pos_s - ux_s * hl_s + uy_s * hw_s
+					])
+					_terrain_batch.add_polyline(u_box, 0.72, mark_stall, false, false)
+				else:
+					# Indoor garage roller bay threshold (`5..8`) along building south wall
+					_terrain_batch.add_rect_rot(b_pos_s + Vector2(0, 1.3 * exp_scale), 3.4 * exp_scale, 3.2 * exp_scale, 0.0, apron_col)
+					_terrain_batch.add_rect_rot(b_pos_s + Vector2(0, 0.5 * exp_scale), 3.0 * exp_scale, 1.2 * exp_scale, 0.0, Color("1E2129"))
+					_terrain_batch.add_rect_rot(b_pos_s + Vector2(0, 1.4 * exp_scale), 3.0 * exp_scale, 0.55 * exp_scale, 0.0, Color("F2B630"))
+
 			# Authentic FactoryLook concrete storage beds (`#E6E2D8` pad + `#A9A59A` dashed perimeter)
 			for pad in sim.get_facility_storage_pads(f):
 				var p_pos: Vector2 = pad["pos"]
@@ -1468,7 +1534,10 @@ func _rebuild_trucks_batches() -> void:
 
 	for ag in sim.agents:
 		var st := String(ag.get("state", ""))
-		if st not in ["driving_outbound", "driving_return", "driving_to_depot", "driving_from_depot", "at_depot"]:
+		if st not in ["driving_outbound", "driving_return", "driving_to_depot", "driving_from_depot", "at_depot", "entering_lot", "leaving_lot", "queuing_bay", "loading", "unloading"]:
+			continue
+		# Indoor garage bays (`bayIndex >= 4`, stalls `5..8`) tuck inside the building portal while docked
+		if (st == "loading" or st == "unloading") and int(ag.get("bayIndex", 0)) >= 4:
 			continue
 		var ap: Vector2 = ag["pos"]
 		if not frustum.has_point(ap):
@@ -1744,7 +1813,6 @@ class _WorldUnderlayDrawer extends Node2D:
 				draw_rect(Rect2(d_pos + Vector2(1.0, -0.8), Vector2(1.7, 1.9)), Color("355F9C"), true)
 
 		# 2. Concrete Storage Pad ShapeGlyphs (`factory_look.gd`: 22% watermark when empty, Lv0..Lv4 grids when stocked)
-		#    + Station Coupled Cargo Trains & Harbour Cargo Ships with `vehicleCargo`!
 		for f in sim.facilities:
 			if not sim.unlocked_regions.has(int(f["regionIndex"])):
 				continue
@@ -1755,10 +1823,14 @@ class _WorldUnderlayDrawer extends Node2D:
 				_draw_storage_pad_contents(pad, cb, is_dark)
 
 			var fk := String(f["kind"])
-			if fk == "station" and bool(f["vehiclePresent"]):
+			if fk == "station" and sim.transport.rail_lines.is_empty() and bool(f["vehiclePresent"]):
 				_draw_docked_train(f, cb)
-			elif fk == "harbour" and bool(f["vehiclePresent"]):
+			elif fk == "harbour" and sim.transport.ship_channels.is_empty() and bool(f["vehiclePresent"]):
 				_draw_docked_ship(f, cb)
+
+		# 2b. Active `ShipService` + River Barges + Movable 2.5D `BasculeBridges` + Active `TrainService`!
+		_draw_active_maritime_and_bridges(sim, frustum, cb, is_dark)
+		_draw_active_trains(sim, frustum, cb)
 
 		# 3. Selected Road / Junction / Facility Highlights
 		if owner_view.selected_road_id != "" and sim.road_map.has(owner_view.selected_road_id):
@@ -2007,6 +2079,254 @@ class _WorldUnderlayDrawer extends Node2D:
 				hold_r.position.y + (1.7 if show_h > cols_h else 3.1) + float(hy) * 2.9
 			)
 			ShapeGlyphs.draw(self, cg, hp, 3.2, 0.0, MapView25D.TRUCK_INK, 0.38, Transform2D.IDENTITY, cb)
+
+	func _draw_active_maritime_and_bridges(sim: SimEngine, frustum: Rect2, cb: bool, is_dark: bool) -> void:
+		var cull_rect: Rect2 = frustum.grow(42.0)
+		var water_cut_col := Color("3A6073") if is_dark else MapView25D.COL_WATER
+
+		# 1. Movable Bascule Bridges: cut open water channel first when span is lifting (`lift > 0.04`)
+		for bb in sim.transport.bascule_bridges:
+			var bp: Vector2 = bb["pos"]
+			if not cull_rect.has_point(bp):
+				continue
+			var lift: float = float(bb.get("lift", 0.0))
+			if lift > 0.04:
+				var rd_id := String(bb["roadId"])
+				var rw_b: float = float(sim.road_map.get(rd_id, {}).get("widthPx", 12.0))
+				var r_ang: float = float(bb["roadAngle"])
+				var fwd := Vector2(cos(r_ang), sin(r_ang))
+				var side := Vector2(-fwd.y, fwd.x)
+				var hs: float = float(bb.get("spanHalfLen", 8.5))
+				var cut_w: float = (rw_b + 5.6) * 0.5
+				draw_colored_polygon(PackedVector2Array([
+					bp - fwd * hs - side * cut_w,
+					bp + fwd * hs - side * cut_w,
+					bp + fwd * hs + side * cut_w,
+					bp - fwd * hs + side * cut_w
+				]), water_cut_col)
+
+		# 2. Active Cargo Ships & River Barges (with expanding V-wakes + cargo holds)
+		for ch in sim.transport.ship_channels:
+			for v in ch.get("vessels", []):
+				if String(v.get("state", "")) == "cooldown":
+					continue
+				var vp: Vector2 = v["pos"]
+				if not cull_rect.has_point(vp):
+					continue
+				var vang: float = float(v["angle"])
+				var vfwd := Vector2(cos(vang), sin(vang))
+				var vside := Vector2(-vfwd.y, vfwd.x)
+				var vlen: float = float(v.get("length", 24.0))
+				var vw: float = float(v.get("width", 6.8))
+				var hl: float = vlen * 0.5
+				var hw: float = vw * 0.5
+				var spd: float = float(v.get("speed", 0.0))
+
+				# Expanding white V-wake behind stern when moving
+				if spd > 1.2:
+					var w_alpha: float = clampf(spd / 20.0, 0.12, 0.36) * (0.55 if is_dark else 1.0)
+					var stern: Vector2 = vp - vfwd * (hl + 0.6)
+					var wake_l: float = clampf(spd * 0.85, 6.0, 18.0)
+					draw_line(stern - vside * (hw * 0.65), stern - vfwd * wake_l - vside * (hw * 2.1), Color(1, 1, 1, w_alpha), 1.35, true)
+					draw_line(stern + vside * (hw * 0.65), stern - vfwd * wake_l + vside * (hw * 2.1), Color(1, 1, 1, w_alpha), 1.35, true)
+					var ripple_t: float = fmod(float(v.get("wakePhase", 0.0)), 1.0)
+					var rp: Vector2 = stern - vfwd * (wake_l * (0.25 + 0.55 * ripple_t))
+					draw_line(rp - vside * hw, rp + vside * hw, Color(1, 1, 1, w_alpha * (1.0 - ripple_t)), 1.0, true)
+
+				var is_ship: bool = String(v.get("kind", "")) == "cargo_ship"
+				var bow_len: float = 5.4 if is_ship else 2.6
+				var hull_col: Color = v.get("hullColor", Color("2C4E72"))
+				var deck_col: Color = v.get("deckColor", Color("D8CFC0"))
+
+				var out_hull := PackedVector2Array([
+					vp - vfwd * (hl + 0.65) - vside * (hw + 0.65),
+					vp + vfwd * (hl - bow_len + 0.4) - vside * (hw + 0.65),
+					vp + vfwd * (hl + 1.1),
+					vp + vfwd * (hl - bow_len + 0.4) + vside * (hw + 0.65),
+					vp - vfwd * (hl + 0.65) + vside * (hw + 0.65)
+				])
+				var in_hull := PackedVector2Array([
+					vp - vfwd * hl - vside * hw,
+					vp + vfwd * (hl - bow_len) - vside * hw,
+					vp + vfwd * (hl + 0.3),
+					vp + vfwd * (hl - bow_len) + vside * hw,
+					vp - vfwd * hl + vside * hw
+				])
+				draw_colored_polygon(out_hull, MapView25D.TRUCK_INK)
+				draw_colored_polygon(in_hull, hull_col)
+
+				# Stern bridge / wheelhouse
+				var br_c: Vector2 = vp - vfwd * (hl - 3.2)
+				var br_hl: float = 2.4 if is_ship else 1.8
+				var br_hw: float = hw * 0.78
+				draw_colored_polygon(PackedVector2Array([
+					br_c - vfwd * br_hl - vside * br_hw,
+					br_c + vfwd * br_hl - vside * br_hw,
+					br_c + vfwd * br_hl + vside * br_hw,
+					br_c - vfwd * br_hl + vside * br_hw
+				]), Color("FAF7EE"))
+				if is_ship:
+					draw_circle(br_c + vfwd * 0.8, 1.25, Color("E8792F"))
+
+				# Recessed cargo hold + ShapeGlyphs
+				var hold_c: Vector2 = vp + vfwd * 1.4
+				var hold_hl: float = maxf(3.8, hl - 4.8)
+				var hold_hw: float = hw * 0.72
+				draw_colored_polygon(PackedVector2Array([
+					hold_c - vfwd * hold_hl - vside * hold_hw,
+					hold_c + vfwd * hold_hl - vside * hold_hw,
+					hold_c + vfwd * hold_hl + vside * hold_hw,
+					hold_c - vfwd * hold_hl + vside * hold_hw
+				]), deck_col.darkened(0.32) if is_ship else deck_col)
+
+				var vcargo: Array = v.get("cargo", [])
+				var cols_v: int = maxi(2, int(floor((hold_hl * 2.0) / 3.4)))
+				var show_v: int = mini(vcargo.size(), cols_v * 2)
+				for ci in range(show_v):
+					var cg := String(vcargo[ci])
+					if not GameCatalog.GOODS.has(cg):
+						continue
+					var cx_i: int = ci % cols_v
+					var cy_i: int = ci / cols_v
+					var lx: float = -hold_hl + (float(cx_i) + 0.5) * ((hold_hl * 2.0) / float(cols_v))
+					var ly: float = ((-0.38 if cy_i == 0 else 0.38) * hold_hw * 2.0) if show_v > cols_v else 0.0
+					var gp: Vector2 = hold_c + vfwd * lx + vside * ly
+					ShapeGlyphs.draw(self, cg, gp, 2.9, vang, MapView25D.TRUCK_INK, 0.36, Transform2D.IDENTITY, cb)
+
+		# 3. Movable Bascule Bridges: draw 2.5D twin lifting deck leaves & approach barriers over passing ships!
+		for bb in sim.transport.bascule_bridges:
+			var bp: Vector2 = bb["pos"]
+			if not cull_rect.has_point(bp):
+				continue
+			var lift: float = float(bb.get("lift", 0.0))
+			var b_down: float = float(bb.get("barrierDown", 0.0))
+			if lift <= 0.01 and b_down <= 0.01:
+				continue
+			var rd_id := String(bb["roadId"])
+			var rw_b: float = float(sim.road_map.get(rd_id, {}).get("widthPx", 12.0))
+			var r_ang: float = float(bb["roadAngle"])
+			var fwd := Vector2(cos(r_ang), sin(r_ang))
+			var side := Vector2(-fwd.y, fwd.x)
+			var hs: float = float(bb.get("spanHalfLen", 8.5))
+			var deck_hw: float = rw_b * 0.5 + 1.4
+
+			if lift > 0.01:
+				var tilt_ang: float = lift * 1.12 # up to ~64° open bascule leaves!
+				var proj_l: float = hs * cos(tilt_ang)
+				var z_lift := Vector2(0.0, -hs * sin(tilt_ang) * 0.82)
+				var leaf_col := Color("4A5060") if not is_dark else Color("343946")
+				var rail_col := Color("F5F2EA") if not is_dark else Color("7A8294")
+
+				for dir_s in [-1.0, 1.0]:
+					var hinge: Vector2 = bp + fwd * (dir_s * hs)
+					var tip: Vector2 = hinge - fwd * (dir_s * proj_l) + z_lift
+					var leaf_poly := PackedVector2Array([
+						hinge - side * deck_hw,
+						tip - side * deck_hw,
+						tip + side * deck_hw,
+						hinge + side * deck_hw
+					])
+					draw_colored_polygon(leaf_poly, leaf_col)
+					draw_line(hinge - side * deck_hw, tip - side * deck_hw, rail_col, 1.5, true)
+					draw_line(hinge + side * deck_hw, tip + side * deck_hw, rail_col, 1.5, true)
+					# Counterweight trunnion pier
+					draw_circle(hinge - side * (deck_hw + 1.6), 2.1, Color("23242B"))
+					draw_circle(hinge + side * (deck_hw + 1.6), 2.1, Color("23242B"))
+
+			if b_down > 0.02:
+				var flash_a: bool = float(bb.get("flashPhase", 0.0)) < 0.5
+				for dir_s in [-1.0, 1.0]:
+					var stop_c: Vector2 = bp + fwd * (dir_s * (hs + 3.2))
+					var post_p: Vector2 = stop_c + side * (dir_s * (deck_hw + 1.8))
+					var arm_len: float = rw_b * 0.88 * b_down
+					var arm_tip: Vector2 = post_p - side * (dir_s * arm_len) + Vector2(0.0, -(1.0 - b_down) * 5.0)
+					draw_line(post_p, arm_tip, Color("FAF7EE"), 2.4, true)
+					draw_line(post_p, post_p.lerp(arm_tip, 0.55), Color("D4383B"), 2.4, true)
+					draw_circle(post_p, 2.2, Color("23242B"))
+					draw_circle(post_p, 1.45, Color("FF2B3B") if flash_a else Color("6A1C24"))
+
+	func _draw_active_trains(sim: SimEngine, frustum: Rect2, cb: bool) -> void:
+		var cull_rect: Rect2 = frustum.grow(32.0)
+		for ln in sim.transport.rail_lines:
+			var tr: Dictionary = ln.get("train", {})
+			if tr.is_empty() or String(tr.get("state", "")) == "cooldown":
+				continue
+			var poses: Array = tr.get("unitPoses", [])
+			if poses.is_empty():
+				continue
+
+			# Draw couplers between locomotive & flatbed wagons
+			for i in range(1, poses.size()):
+				var p0: Vector2 = poses[i - 1]["pos"]
+				var p1: Vector2 = poses[i]["pos"]
+				if cull_rect.has_point(p0) or cull_rect.has_point(p1):
+					draw_line(p0, p1, MapView25D.TRUCK_INK, 2.1, true)
+
+			for pose in poses:
+				var up: Vector2 = pose["pos"]
+				if not cull_rect.has_point(up):
+					continue
+				var ang: float = float(pose["angle"])
+				var fwd := Vector2(cos(ang), sin(ang))
+				var side := Vector2(-fwd.y, fwd.x)
+				var ulen: float = float(pose["len"])
+				var hl: float = ulen * 0.5
+				var hw: float = 3.35
+				var pkind := String(pose["kind"])
+
+				var out_p := PackedVector2Array([
+					up - fwd * (hl + 0.55) - side * (hw + 0.55),
+					up + fwd * (hl + 0.55) - side * (hw + 0.55),
+					up + fwd * (hl + 0.55) + side * (hw + 0.55),
+					up - fwd * (hl + 0.55) + side * (hw + 0.55)
+				])
+				draw_colored_polygon(out_p, MapView25D.TRUCK_INK)
+
+				if pkind == "loco":
+					var body_p := PackedVector2Array([
+						up - fwd * hl - side * hw,
+						up + fwd * (hl - 1.4) - side * hw,
+						up + fwd * hl - side * (hw * 0.68),
+						up + fwd * hl + side * (hw * 0.68),
+						up + fwd * (hl - 1.4) + side * hw,
+						up - fwd * hl + side * hw
+					])
+					draw_colored_polygon(body_p, Color("E8792F"))
+					# Yellow safety nose stripe + dark cab glass + roof exhaust fan
+					var cab_c: Vector2 = up + fwd * (hl - 3.1)
+					draw_colored_polygon(PackedVector2Array([
+						cab_c - fwd * 1.4 - side * (hw * 0.78),
+						cab_c + fwd * 1.4 - side * (hw * 0.78),
+						cab_c + fwd * 1.4 + side * (hw * 0.78),
+						cab_c - fwd * 1.4 + side * (hw * 0.78)
+					]), MapView25D.TRUCK_GLASS)
+					draw_circle(up - fwd * 1.8, 1.45, Color("2B3442"))
+					draw_circle(up + fwd * (hl - 0.5) - side * 1.6, 0.85, Color("FFF3C4"))
+					draw_circle(up + fwd * (hl - 0.5) + side * 1.6, 0.85, Color("FFF3C4"))
+				else:
+					var wag_p := PackedVector2Array([
+						up - fwd * hl - side * hw,
+						up + fwd * hl - side * hw,
+						up + fwd * hl + side * hw,
+						up - fwd * hl + side * hw
+					])
+					draw_colored_polygon(wag_p, MapView25D.TRUCK_PAPER)
+					# Blue bolster end beams
+					for end_s in [-1.0, 1.0]:
+						var bc: Vector2 = up + fwd * (end_s * (hl - 0.65))
+						draw_line(bc - side * hw, bc + side * hw, Color("3B6E8C"), 1.3, true)
+					# Draw up to `5 x 2 = 10` cargo glyphs on flatbed!
+					var c_slice: Array = pose.get("cargo", [])
+					for ci in range(mini(c_slice.size(), 10)):
+						var cg := String(c_slice[ci])
+						if not GameCatalog.GOODS.has(cg):
+							continue
+						var col_i: int = ci / 2
+						var row_i: int = ci % 2
+						var lx: float = (-2.0 + float(col_i)) * 2.05
+						var ly: float = -1.35 if row_i == 0 else 1.35
+						var gp: Vector2 = up + fwd * lx + side * ly
+						ShapeGlyphs.draw(self, cg, gp, 2.35, ang + ShapeGlyphs.truck_angle(cg), MapView25D.TRUCK_INK, 0.34, Transform2D.IDENTITY, cb)
 
 	func _draw_selected_junction_bands_and_ring(sj: Dictionary, sim: SimEngine) -> void:
 		var jp: Vector2 = sj["pos"]
@@ -2383,6 +2703,9 @@ class _DynamicWorldDrawer extends Node2D:
 		var is_dark: bool = owner_view.dark_theme or sim.night_mode
 		var inv_z: float = clampf(1.0 / maxf(0.35, zoom_x), 0.65, 1.75)
 
+		# 0. Active Rail-Road `LevelCrossings` (twin alternating red flashers + lowering red/white boom arms)
+		_draw_rail_level_crossings(sim, frustum, is_dark)
+
 		# 1. Authentic `CargoFlights` (`cargo_flights.gd`: parabolic hops + landing rings + crumble shards)
 		_draw_cargo_flights(sim, frustum, cb)
 
@@ -2413,7 +2736,7 @@ class _DynamicWorldDrawer extends Node2D:
 			var stuck_cnt: int = int(stuck_by_fac.get(String(f["id"]), 0))
 			_draw_facility_badge(f, sim, font, zoom_x, cb, stuck_cnt)
 
-		# 6. Authentic RegionGate World Pins on Active Locked Region
+		# 6. Authentic RegionGate World Pins on Locked Regions (active gate delegated to WorldShows when enabled)
 		var active_goal_reg: Dictionary = sim.get_active_goal_region()
 		var active_goal_idx: int = int(active_goal_reg.get("index", -1)) if not active_goal_reg.is_empty() else -1
 		for reg in sim.regions:
@@ -2422,6 +2745,8 @@ class _DynamicWorldDrawer extends Node2D:
 				continue
 			if not bool(reg["unlocked"]):
 				var is_next: bool = int(reg["index"]) == active_goal_idx
+				if is_next and owner_view.interactive_gate_handled:
+					continue
 				_draw_region_gate_pin(reg, font, inv_z, is_next, cb)
 			elif zoom_x < 0.78:
 				var rcol := Color(0.18, 0.20, 0.24, 0.45) if not is_dark else Color(0.85, 0.88, 0.92, 0.40)
@@ -2433,6 +2758,53 @@ class _DynamicWorldDrawer extends Node2D:
 			if not frustum.has_point(tp):
 				continue
 			_draw_reward_popup(tst, tp, font, inv_z)
+
+	func _draw_rail_level_crossings(sim: SimEngine, frustum: Rect2, is_dark: bool) -> void:
+		for cx in sim.transport.level_crossings:
+			var cp: Vector2 = cx["pos"]
+			if not frustum.has_point(cp):
+				continue
+			var rd_id := String(cx["roadId"])
+			var rd: Dictionary = sim.road_map.get(rd_id, {})
+			if rd.is_empty() or not bool(rd.get("isBuilt", true)) or not sim.unlocked_regions.has(int(rd.get("regionIndex", 0))):
+				continue
+			var rw: float = float(rd.get("widthPx", 10.0))
+			var r_ang: float = float(cx["roadAngle"])
+			var r_fwd := Vector2(cos(r_ang), sin(r_ang))
+			var r_side := Vector2(-r_fwd.y, r_fwd.x)
+			var down: float = float(cx.get("down", 0.0))
+			var closed: bool = bool(cx.get("closed", false))
+			var fphase: float = float(cx.get("flashPhase", 0.0))
+			var mark_c := Color(MapView25D.COL_LANE_MARK, 0.86 if not is_dark else 0.58)
+
+			for dir_s in [-1.0, 1.0]:
+				var stop_c: Vector2 = cp + r_fwd * (dir_s * 5.6)
+				# White stop bar across road approach
+				draw_line(stop_c - r_side * (rw * 0.46), stop_c + r_side * (rw * 0.46), mark_c, 1.15, true)
+				# Curb signal post + St. Andrew's crossbuck + twin alternating red LEDs
+				var curb_sign: float = -dir_s if sim.left_hand_traffic else dir_s
+				var post_p: Vector2 = stop_c + r_side * (curb_sign * (rw * 0.5 + 2.2))
+				draw_circle(post_p + Vector2(0.4, 0.7), 2.3, Color(0, 0, 0, 0.24))
+				draw_circle(post_p, 2.2, Color("23242B"))
+				if closed or down > 0.04:
+					var led_a_on: bool = fphase < 0.5
+					draw_circle(post_p + Vector2(-0.75, 0.0), 0.95, Color("FF2B3B") if led_a_on else Color("5A1A20"))
+					draw_circle(post_p + Vector2(0.75, 0.0), 0.95, Color("FF2B3B") if not led_a_on else Color("5A1A20"))
+				else:
+					draw_circle(post_p, 1.05, Color("FAF7EE"))
+
+				# Lowering red-and-white striped boom barrier (`down: 0..1`)
+				if down > 0.02:
+					var full_arm: float = rw * 0.86
+					var horiz_len: float = full_arm * down
+					var z_up := Vector2(0.0, -(1.0 - down) * 5.8)
+					var arm_end: Vector2 = post_p - r_side * (curb_sign * horiz_len) + z_up
+					draw_line(post_p + Vector2(0, 0.9), arm_end + Vector2(0, 0.9), Color(0, 0, 0, 0.20), 2.4, true)
+					draw_line(post_p, arm_end, Color("FAF7EE"), 2.3, true)
+					for si in range(3):
+						var t0: float = float(si) * 0.34
+						var t1: float = minf(1.0, t0 + 0.19)
+						draw_line(post_p.lerp(arm_end, t0), post_p.lerp(arm_end, t1), Color("D4383B"), 2.3, true)
 
 	func _draw_cargo_flights(sim: SimEngine, frustum: Rect2, cb: bool) -> void:
 		for fl in sim.cargo_flights:

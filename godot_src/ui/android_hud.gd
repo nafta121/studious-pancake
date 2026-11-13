@@ -16,6 +16,7 @@ signal hide_flyovers_toggled(on: bool)
 signal colorblind_toggled(on: bool)
 signal cloud_shadows_toggled(on: bool)
 signal focus_world_requested(world_pos: Vector2)
+signal pause_menu_requested()
 
 var sim: SimEngine
 var map_view: MapView25D
@@ -35,6 +36,7 @@ var _root: Control
 
 # Zone 1: Top-Center MoneyDisplay Pill
 var _money_pill: PanelContainer
+var _pause_btn: Button
 var _crest_widget: _CrestWidget
 var _town_btn: Button
 var _cash_btn: Button
@@ -48,6 +50,7 @@ var _goals_sub_lbl: Label
 var _goals_rings_row: HBoxContainer
 var _goals_hold_lbl: Label
 var _goals_hold_bar: ProgressBar
+var _goals_open_btn: Button
 var _goals_mini_pill: PanelContainer
 var _goals_mini_ring: _MiniGoalRingWidget
 var _goals_mini_btn: Button
@@ -174,9 +177,17 @@ func _build_shell() -> void:
 	_root.add_child(_money_pill)
 
 	var money_row := HBoxContainer.new()
-	money_row.add_theme_constant_override("separation", 10)
+	money_row.add_theme_constant_override("separation", 8)
 	money_row.alignment = BoxContainer.ALIGNMENT_CENTER
 	_money_pill.add_child(money_row)
+
+	_pause_btn = Button.new()
+	_pause_btn.theme_type_variation = &"QuietButton"
+	_pause_btn.focus_mode = Control.FOCUS_NONE
+	_pause_btn.text = "☰"
+	_pause_btn.custom_minimum_size = Vector2(30, 28)
+	_pause_btn.pressed.connect(func(): pause_menu_requested.emit())
+	money_row.add_child(_pause_btn)
 
 	_crest_widget = _CrestWidget.new()
 	_crest_widget.custom_minimum_size = Vector2(22, 26)
@@ -196,7 +207,7 @@ func _build_shell() -> void:
 	_cash_btn.flat = true
 	_cash_btn.focus_mode = Control.FOCUS_NONE
 	_cash_btn.add_theme_font_size_override("font_size", 22)
-	_cash_btn.text = "$3,500"
+	_cash_btn.text = "$500"
 	_cash_btn.pressed.connect(func(): open_drawer("routes"))
 	money_row.add_child(_cash_btn)
 
@@ -257,7 +268,7 @@ func _build_shell() -> void:
 	_goals_hold_lbl = Label.new()
 	_goals_hold_lbl.theme_type_variation = &"CaptionLabel"
 	_goals_hold_lbl.add_theme_font_size_override("font_size", 11)
-	_goals_hold_lbl.text = "Meet every goal at once for 30 s"
+	_goals_hold_lbl.text = "Meet every goal at once for %d s" % int(SimEngine.HOLD_REQUIRED_SEC)
 	g_col.add_child(_goals_hold_lbl)
 
 	_goals_hold_bar = ProgressBar.new()
@@ -266,6 +277,19 @@ func _build_shell() -> void:
 	_goals_hold_bar.show_percentage = false
 	_goals_hold_bar.custom_minimum_size = Vector2(0, 7)
 	g_col.add_child(_goals_hold_bar)
+
+	_goals_open_btn = Button.new()
+	_goals_open_btn.theme_type_variation = &"PrimaryButton"
+	_goals_open_btn.focus_mode = Control.FOCUS_NONE
+	_goals_open_btn.custom_minimum_size = Vector2(0, 34)
+	_goals_open_btn.visible = false
+	_goals_open_btn.text = "🔓 OPEN REGION!"
+	_goals_open_btn.pressed.connect(func():
+		if sim != null and not sim.trigger_ready_region_or_boom().is_empty():
+			_refresh_goals_panel()
+			refresh_top_bar()
+	)
+	g_col.add_child(_goals_open_btn)
 
 	# Mini pill when collapsed or in Portrait mode
 	_goals_mini_pill = PanelContainer.new()
@@ -829,17 +853,23 @@ func _layout_responsive() -> void:
 	else:
 		_goals_card.visible = not _goals_collapsed
 		_goals_mini_pill.visible = _goals_collapsed
+		var right_limit_x: float = vp.x - pad_r
 		if _goals_card.visible:
 			var gc_w: float = 276.0
 			_goals_card.reset_size()
 			var gc_h: float = maxf(138.0, _goals_card.get_combined_minimum_size().y)
 			_goals_card.position = Vector2(vp.x - pad_r - gc_w - 4.0, pad_t)
 			_goals_card.size = Vector2(gc_w, gc_h)
+			right_limit_x = _goals_card.position.x - 12.0
 		else:
 			_goals_mini_pill.reset_size()
 			var gm_sz2 := _goals_mini_pill.get_combined_minimum_size()
 			_goals_mini_pill.position = Vector2(vp.x - pad_r - gm_sz2.x - 4.0, pad_t)
 			_goals_mini_pill.size = gm_sz2
+			right_limit_x = _goals_mini_pill.position.x - 12.0
+		mp_sz.x = clampf(mp_sz.x, 280.0, maxf(280.0, right_limit_x - pad_l))
+		_money_pill.size = mp_sz
+		_money_pill.position = Vector2(maxf(pad_l, minf((vp.x - mp_sz.x) * 0.5, right_limit_x - mp_sz.x)), pad_t)
 
 	# 3. Left-Center Vertical RuleToolbar
 	for k in _tool_btns.keys():
@@ -927,7 +957,13 @@ func _layout_responsive() -> void:
 
 	# 8. Toast Banner
 	var bw: float = minf(420.0, vp.x - pad_l - pad_r - 4.0)
-	_banner_panel.position = Vector2((vp.x - bw) * 0.5, _money_pill.position.y + _money_pill.size.y + 8.0)
+	var bx: float = (vp.x - bw) * 0.5
+	var by: float = _money_pill.position.y + _money_pill.size.y + 8.0
+	if not is_portrait and _goals_card.visible:
+		bx = maxf(pad_l + 80.0, minf(bx, _goals_card.position.x - bw - 12.0))
+	elif is_portrait and _goals_mini_pill.visible:
+		by = _goals_mini_pill.position.y + _goals_mini_pill.size.y + 6.0
+	_banner_panel.position = Vector2(bx, by)
 	_banner_panel.size = Vector2(bw, 36.0)
 
 func _process(delta: float) -> void:
@@ -982,9 +1018,12 @@ func refresh_top_bar() -> void:
 		map_nm = map_nm.substr(0, paren_idx)
 	map_nm = map_nm.replace(" Terpadu", "")
 	var is_portrait: bool = get_viewport().get_visible_rect().size.x < get_viewport().get_visible_rect().size.y
-	if is_portrait and map_nm.length() > 16:
-		map_nm = map_nm.replace("Kabupaten ", "Kab. ")
-	_town_btn.text = map_nm + " ▾"
+	if is_portrait and map_nm.length() > 14:
+		map_nm = map_nm.replace("Kabupaten ", "Kab. ").replace("Karesidenan ", "")
+	if is_portrait:
+		_town_btn.text = "%s ▾" % map_nm
+	else:
+		_town_btn.text = "%s · 👥%s ▾" % [map_nm, String.num_int64(sim.town_population)]
 
 	_cash_btn.text = GameCatalog.fmt_cash(sim.cash)
 
@@ -1023,6 +1062,11 @@ func refresh_top_bar() -> void:
 		else:
 			var fnm: String = String(sim.facility_map.get(map_view.route_draft_from_id, {}).get("name", "Origin"))
 			_route_hint_lbl.text = "From %s → tap destination building" % fnm
+
+	if not is_portrait and _money_pill != null:
+		var need_w: float = _money_pill.get_combined_minimum_size().x
+		if absf(need_w - _money_pill.size.x) > 2.0:
+			_layout_responsive()
 
 func _refresh_goals_panel() -> void:
 	if sim == null or _goals_rings_row == null:
@@ -1064,16 +1108,31 @@ func _refresh_goals_panel() -> void:
 		sum_pct += clampf(gw.cur_rate / maxf(0.1, gw.target_rate), 0.0, 1.0)
 
 	var hold_s: float = float(greg.get("holdSeconds", 0.0))
-	_goals_hold_bar.value = hold_s
-	if hold_s > 0.2:
+	var gate_st: Dictionary = sim.get_region_gate_state()
+	var is_ready: bool = bool(gate_st.get("isReady", false))
+	var is_boom_mode: bool = bool(gate_st.get("isBoom", unl))
+
+	_goals_hold_bar.max_value = SimEngine.HOLD_REQUIRED_SEC
+	_goals_hold_bar.value = SimEngine.HOLD_REQUIRED_SEC if is_ready else hold_s
+	if is_ready:
+		_goals_hold_lbl.text = "✓ Ready! Tap gate on map or button below"
+	elif hold_s > 0.2:
 		_goals_hold_lbl.text = "Holding all goals: %d / %d s" % [int(round(hold_s)), int(SimEngine.HOLD_REQUIRED_SEC)]
 	else:
 		_goals_hold_lbl.text = "Meet every goal at once for %d s" % int(SimEngine.HOLD_REQUIRED_SEC)
 
-	var avg_pct: float = sum_pct / float(maxi(1, goals.size()))
+	if _goals_open_btn != null:
+		_goals_open_btn.visible = is_ready
+		if is_ready:
+			_goals_open_btn.text = ("🚀 GROW BOOMTOWN LV.%d!" % (sim.boomtown_level + 1)) if is_boom_mode else ("🔓 OPEN REGION %d!" % r_num)
+
+	var avg_pct: float = 1.0 if is_ready else (sum_pct / float(maxi(1, goals.size())))
 	_goals_mini_ring.progress = avg_pct
 	_goals_mini_ring.queue_redraw()
-	_goals_mini_btn.text = ("Region %d (%d%%) ▾" % [r_num, int(round(avg_pct * 100.0))]) if not unl else ("Boomtown Lv.%d ▾" % (sim.boomtown_level + 1))
+	if is_ready:
+		_goals_mini_btn.text = "🚀 GROW! ▾" if is_boom_mode else ("🔓 OPEN R%d! ▾" % r_num)
+	else:
+		_goals_mini_btn.text = ("Region %d (%d%%) ▾" % [r_num, int(round(avg_pct * 100.0))]) if not unl else ("Boomtown Lv.%d ▾" % (sim.boomtown_level + 1))
 
 # === SPEED, OVERLAY & RULE TOOLBAR CONTROLS ===
 
@@ -1535,18 +1594,28 @@ func _build_authentic_factory_panel() -> void:
 		ucol.add_child(udesc)
 
 		var ubtn := Button.new()
-		ubtn.theme_type_variation = &"PrimaryButton"
 		ubtn.focus_mode = Control.FOCUS_NONE
 		ubtn.custom_minimum_size = Vector2(0, 36)
-		ubtn.text = locked if locked != "" else GameCatalog.fmt_cash(int(up["price"]))
-		ubtn.disabled = (locked != "")
 		ubtn.set_meta(&"sfx", "")
-		ubtn.pressed.connect(func():
-			if sim.buy_facility_upgrade(fid, track):
-				if sim.sfx:
-					sim.sfx.play_ui("purchase")
-				_populate_drawer()
-		)
+		if track == "exitRoad" and int(up["level"]) > 0:
+			ubtn.theme_type_variation = &"QuietButton"
+			ubtn.text = "Sell (+$10k)"
+			ubtn.add_theme_color_override("font_color", _status_col(&"bad", Color("C2412F")))
+			ubtn.pressed.connect(func():
+				if sim.sell_facility_exit_road(fid):
+					show_toast_banner("Exit road sold (+$10,000)", 2.2)
+					_populate_drawer()
+			)
+		else:
+			ubtn.theme_type_variation = &"PrimaryButton"
+			ubtn.text = locked if locked != "" else GameCatalog.fmt_cash(int(up["price"]))
+			ubtn.disabled = (locked != "")
+			ubtn.pressed.connect(func():
+				if sim.buy_facility_upgrade(fid, track):
+					if sim.sfx:
+						sim.sfx.play_ui("purchase")
+					_populate_drawer()
+			)
 		ucol.add_child(ubtn)
 		up_grid.add_child(ucard)
 
@@ -2533,7 +2602,7 @@ func _build_authentic_road_panel() -> void:
 
 	var cut_n: int = sim.count_routes_cut_by_closing(rid)
 	var close_lbl: String = "Reopen street ($0)" if bool(r["closed"]) else (
-		("Close street ($3,200 · cuts %d routes!)" % cut_n) if cut_n > 0 else "Close street into pedestrian park ($3,200)"
+		("Close street ($0 · cuts %d routes!)" % cut_n) if cut_n > 0 else "Close street into pedestrian park ($0)"
 	)
 
 	for act in [
@@ -2563,7 +2632,9 @@ func _build_authentic_offers_panel() -> void:
 	for off in sim.road_offers:
 		var oid := String(off["id"])
 		var bought: bool = bool(off["purchased"])
+		var excl: bool = bool(off.get("excluded", false))
 		var reg_ok: bool = sim.unlocked_regions.has(int(off["regionIndex"]))
+		var eff_price: int = sim.get_road_offer_price(off)
 		var card := PanelContainer.new()
 		card.theme_type_variation = &"CardPanel"
 		var col := VBoxContainer.new()
@@ -2580,8 +2651,15 @@ func _build_authentic_offers_panel() -> void:
 		var b := Button.new()
 		b.theme_type_variation = &"PrimaryButton"
 		b.focus_mode = Control.FOCUS_NONE
-		b.disabled = bought or (not reg_ok)
-		b.text = "Built" if bought else (("Locked (Region %d)" % (int(off["regionIndex"]) + 1)) if not reg_ok else ("Build " + GameCatalog.fmt_cash(int(off["price"]))))
+		b.disabled = bought or excl or (not reg_ok)
+		if bought:
+			b.text = "Built"
+		elif excl:
+			b.text = "Clashes with built road"
+		elif not reg_ok:
+			b.text = "Locked (Region %d)" % (int(off["regionIndex"]) + 1)
+		else:
+			b.text = "Build " + GameCatalog.fmt_cash(eff_price)
 		b.pressed.connect(func():
 			show_toast_banner(sim.purchase_road_offer(oid))
 			_populate_drawer()
@@ -2590,8 +2668,26 @@ func _build_authentic_offers_panel() -> void:
 		_inspector_body.add_child(card)
 
 func _build_authentic_goals_sheet() -> void:
-	_inspector_title.text = "Regional Goals"
-	_inspector_sub.text = "Deliver goods to any station, harbour, or market and hold all goals for 30 s:"
+	var hold_req: int = int(SimEngine.HOLD_REQUIRED_SEC)
+	_inspector_title.text = "Regional Goals & Boomtown"
+	_inspector_sub.text = "Deliver goods to any station, harbour, or market and hold all goals for %d s:" % hold_req
+
+	var gate_st: Dictionary = sim.get_region_gate_state()
+	if bool(gate_st.get("isReady", false)):
+		var is_b: bool = bool(gate_st.get("isBoom", false))
+		var open_b := Button.new()
+		open_b.theme_type_variation = &"PrimaryButton"
+		open_b.focus_mode = Control.FOCUS_NONE
+		open_b.custom_minimum_size = Vector2(0, 42)
+		open_b.text = ("🚀 GROW BOOMTOWN LV.%d NOW!" % (sim.boomtown_level + 1)) if is_b else "🔓 OPEN READY REGION NOW!"
+		open_b.pressed.connect(func():
+			close_drawer()
+			sim.trigger_ready_region_or_boom()
+			_refresh_goals_panel()
+			refresh_top_bar()
+		)
+		_inspector_body.add_child(open_b)
+
 	for reg in sim.regions:
 		var card := PanelContainer.new()
 		card.theme_type_variation = &"CardPanel"
@@ -2599,8 +2695,10 @@ func _build_authentic_goals_sheet() -> void:
 		col.add_theme_constant_override("separation", 4)
 		card.add_child(col)
 		var unl: bool = bool(reg["unlocked"])
+		var rdy: bool = bool(reg.get("goalReady", false)) or float(reg.get("holdSeconds", 0.0)) >= SimEngine.HOLD_REQUIRED_SEC
+		var status_s: String = "OPEN" if unl else ("READY TO OPEN!" if rdy else ("HOLD %ds/%ds" % [int(round(float(reg["holdSeconds"]))), hold_req]))
 		var hd := Label.new()
-		hd.text = "Region %d: %s — %s" % [int(reg["index"]) + 1, String(reg["name"]), "OPEN" if unl else ("HOLD %ds/30s" % int(round(float(reg["holdSeconds"]))))]
+		hd.text = "Region %d: %s — %s" % [int(reg["index"]) + 1, String(reg["name"]), status_s]
 		col.add_child(hd)
 		for g in reg["goals"]:
 			var gid := String(g["good"])
@@ -3324,7 +3422,7 @@ func _build_overview_options_tab() -> void:
 		mv_s.step = 0.05
 		mv_s.value = sim.sfx.master_volume
 		mv_s.value_changed.connect(func(v: float):
-			sim.sfx.set_volumes(v, sim.sfx.ui_volume, sim.sfx.delivery_volume)
+			sim.sfx.set_volumes(v, sim.sfx.ui_volume, sim.sfx.delivery_volume, sim.sfx.ambience_volume, sim.sfx.trucks_volume)
 			mv_lbl.text = "Master Volume: %d%%" % int(round(v * 100.0))
 		)
 		a_col.add_child(mv_s)
@@ -3339,10 +3437,40 @@ func _build_overview_options_tab() -> void:
 		uv_s.step = 0.05
 		uv_s.value = sim.sfx.ui_volume
 		uv_s.value_changed.connect(func(v: float):
-			sim.sfx.set_volumes(sim.sfx.master_volume, v, sim.sfx.delivery_volume)
+			sim.sfx.set_volumes(sim.sfx.master_volume, v, sim.sfx.delivery_volume, sim.sfx.ambience_volume, sim.sfx.trucks_volume)
 			uv_lbl.text = "UI Sound Volume: %d%%" % int(round(v * 100.0))
 		)
 		a_col.add_child(uv_s)
+
+		var av_lbl := Label.new()
+		av_lbl.theme_type_variation = &"CaptionLabel"
+		av_lbl.text = "City Ambience Volume: %d%%" % int(round(sim.sfx.ambience_volume * 100.0))
+		a_col.add_child(av_lbl)
+		var av_s := HSlider.new()
+		av_s.min_value = 0.0
+		av_s.max_value = 1.0
+		av_s.step = 0.05
+		av_s.value = sim.sfx.ambience_volume
+		av_s.value_changed.connect(func(v: float):
+			sim.sfx.set_volumes(sim.sfx.master_volume, sim.sfx.ui_volume, sim.sfx.delivery_volume, v, sim.sfx.trucks_volume)
+			av_lbl.text = "City Ambience Volume: %d%%" % int(round(v * 100.0))
+		)
+		a_col.add_child(av_s)
+
+		var tv_lbl := Label.new()
+		tv_lbl.theme_type_variation = &"CaptionLabel"
+		tv_lbl.text = "Trucks, Rail & Ships Volume: %d%%" % int(round(sim.sfx.trucks_volume * 100.0))
+		a_col.add_child(tv_lbl)
+		var tv_s := HSlider.new()
+		tv_s.min_value = 0.0
+		tv_s.max_value = 1.0
+		tv_s.step = 0.05
+		tv_s.value = sim.sfx.trucks_volume
+		tv_s.value_changed.connect(func(v: float):
+			sim.sfx.set_volumes(sim.sfx.master_volume, sim.sfx.ui_volume, sim.sfx.delivery_volume, sim.sfx.ambience_volume, v)
+			tv_lbl.text = "Trucks, Rail & Ships Volume: %d%%" % int(round(v * 100.0))
+		)
+		a_col.add_child(tv_s)
 
 		var dv_lbl := Label.new()
 		dv_lbl.theme_type_variation = &"CaptionLabel"
@@ -3354,7 +3482,7 @@ func _build_overview_options_tab() -> void:
 		dv_s.step = 0.05
 		dv_s.value = sim.sfx.delivery_volume
 		dv_s.value_changed.connect(func(v: float):
-			sim.sfx.set_volumes(sim.sfx.master_volume, sim.sfx.ui_volume, v)
+			sim.sfx.set_volumes(sim.sfx.master_volume, sim.sfx.ui_volume, v, sim.sfx.ambience_volume, sim.sfx.trucks_volume)
 			dv_lbl.text = "Delivery Coin Volume: %d%%" % int(round(v * 100.0))
 		)
 		a_col.add_child(dv_s)
