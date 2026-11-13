@@ -67,7 +67,16 @@ echo "==> [4/5] Importing project & exporting signed Godot 4.7.2 Android APK..."
 "${GODOT_BIN}" --headless --path "${ROOT}" --import
 "${GODOT_BIN}" --headless --path "${ROOT}" --export-release "Android" "${OUT_APK}"
 
-echo "==> [5/5] Verifying APK cryptographic signatures (v1/v2/v3)..."
+echo "==> [5/5] Applying full v1/v2/v3 cryptographic signatures & verifying APK..."
+apksigner sign \
+  --ks "${KEYSTORE_PATH}" \
+  --ks-key-alias "${KEYSTORE_USER}" \
+  --ks-pass "pass:${KEYSTORE_PASS}" \
+  --key-pass "pass:${KEYSTORE_PASS}" \
+  --v1-signing-enabled true \
+  --v2-signing-enabled true \
+  --v3-signing-enabled true \
+  "${OUT_APK}"
 apksigner verify --verbose "${OUT_APK}" | head -n 20
 ls -lh "${OUT_APK}"
 echo "==> SUCCESS: Signed Godot Android APK ready at ${OUT_APK}"

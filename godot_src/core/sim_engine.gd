@@ -297,6 +297,20 @@ func get_owned_count_by_model(model_id: String) -> int:
 func get_next_truck_price(model_id: String) -> int:
 	return GameCatalog.compute_truck_buy_price(model_id, get_owned_count_by_model(model_id), agents.size())
 
+func buy_license(model_id: String) -> bool:
+	if unlocked_licenses.has(model_id) or not GameCatalog.TRUCKS.has(model_id):
+		return false
+	var lic: int = int(GameCatalog.TRUCKS[model_id]["license_price"])
+	if cash < lic:
+		if sfx:
+			sfx.warn()
+		return false
+	cash -= lic
+	unlocked_licenses[model_id] = true
+	if sfx:
+		sfx.play_ui("purchase")
+	return true
+
 func get_capacity_slots(f: Dictionary) -> int:
 	var up: Dictionary = f["upgrades"]
 	var lvl: int = clampi(int(up.get("buffer", 0)), 0, GameCatalog.BUFFER_CAPACITIES.size() - 1)

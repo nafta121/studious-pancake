@@ -33,130 +33,130 @@ const GOODS := {
 	"dot": {
 		"id": "dot", "name": "Dot", "local": "Padi & Tebu",
 		"tier": 1, "role": "raw", "op": "raw", "slots": 1, "value": 50,
-		"color": Color("#4ea854"), "stroke": Color("#2b6b30"), "inputs": []
+		"color": Color("#E0533D"), "stroke": Color("#8F2D1E"), "inputs": []
 	},
 	"wedge": {
 		"id": "wedge", "name": "Wedge", "local": "Kayu Jati",
 		"tier": 1, "role": "raw", "op": "raw", "slots": 1, "value": 50,
-		"color": Color("#d9833b"), "stroke": Color("#874918"), "inputs": []
+		"color": Color("#EFA42A"), "stroke": Color("#94600E"), "inputs": []
 	},
 	"block": {
 		"id": "block", "name": "Block", "local": "Batu & Pasir",
 		"tier": 1, "role": "raw", "op": "raw", "slots": 1, "value": 50,
-		"color": Color("#5b82b8"), "stroke": Color("#2d4a73"), "inputs": []
+		"color": Color("#2E6BB0"), "stroke": Color("#1B416E"), "inputs": []
 	},
 	"capsule": {
 		"id": "capsule", "name": "Capsule", "local": "Gula Kristal",
 		"tier": 2, "role": "part", "op": "press", "slots": 1, "value": 100,
-		"color": Color("#5ec269"), "stroke": Color("#286e31"),
+		"color": Color("#E0533D"), "stroke": Color("#8F2D1E"),
 		"inputs": [{"good": "dot", "qty": 2}]
 	},
 	"diamond": {
 		"id": "diamond", "name": "Diamond", "local": "Panel Jati",
 		"tier": 2, "role": "part", "op": "press", "slots": 1, "value": 100,
-		"color": Color("#e69b45"), "stroke": Color("#8a5213"),
+		"color": Color("#EFA42A"), "stroke": Color("#94600E"),
 		"inputs": [{"good": "wedge", "qty": 2}]
 	},
 	"bar": {
 		"id": "bar", "name": "Bar", "local": "Baja Rel",
 		"tier": 2, "role": "part", "op": "press", "slots": 1, "value": 100,
-		"color": Color("#6d94c9"), "stroke": Color("#2d4c78"),
+		"color": Color("#2E6BB0"), "stroke": Color("#1B416E"),
 		"inputs": [{"good": "block", "qty": 2}]
 	},
 	"drop": {
 		"id": "drop", "name": "Drop", "local": "Minyak Atsiri",
 		"tier": 2, "role": "part", "op": "press", "slots": 1, "value": 100,
-		"color": Color("#9ec447"), "stroke": Color("#536b19"),
+		"color": Color("#E8792F"), "stroke": Color("#8F4312"),
 		"inputs": [{"good": "dot", "qty": 1}, {"good": "wedge", "qty": 1}]
 	},
 	"pebble": {
 		"id": "pebble", "name": "Pebble", "local": "Keramik & Marmer",
 		"tier": 2, "role": "part", "op": "press", "slots": 1, "value": 100,
-		"color": Color("#4eb3a8"), "stroke": Color("#21665e"),
+		"color": Color("#8B5A9C"), "stroke": Color("#53335E"),
 		"inputs": [{"good": "dot", "qty": 1}, {"good": "block", "qty": 1}]
 	},
 	"shield": {
 		"id": "shield", "name": "Shield", "local": "Pelat Komposit",
 		"tier": 2, "role": "part", "op": "press", "slots": 1, "value": 100,
-		"color": Color("#9c78bd"), "stroke": Color("#53386e"),
+		"color": Color("#5F9B52"), "stroke": Color("#365E2D"),
 		"inputs": [{"good": "wedge", "qty": 1}, {"good": "block", "qty": 1}]
 	},
 	"moon": {
 		"id": "moon", "name": "Moon", "local": "Kulit Samak",
 		"tier": 2, "role": "part", "op": "cut", "slots": 1, "value": 100,
-		"color": Color("#e3be46"), "stroke": Color("#7d6412"),
+		"color": Color("#E0533D"), "stroke": Color("#8F2D1E"),
 		"inputs": [{"good": "dot", "qty": 2}]
 	},
 	"chevron": {
 		"id": "chevron", "name": "Chevron", "local": "Rangka Presisi",
 		"tier": 2, "role": "part", "op": "cut", "slots": 1, "value": 100,
-		"color": Color("#eb7b4b"), "stroke": Color("#873816"),
+		"color": Color("#EFA42A"), "stroke": Color("#94600E"),
 		"inputs": [{"good": "wedge", "qty": 2}]
 	},
 	"dome": {
 		"id": "dome", "name": "Dome", "local": "Kubah Cor",
 		"tier": 2, "role": "part", "op": "cut", "slots": 1, "value": 100,
-		"color": Color("#5aa6cf"), "stroke": Color("#245978"),
+		"color": Color("#E0533D"), "stroke": Color("#8F2D1E"),
 		"inputs": [{"good": "dot", "qty": 1}, {"good": "block", "qty": 1}]
 	},
 	"heart": {
 		"id": "heart", "name": "Heart", "local": "Olahan Brem",
 		"tier": 3, "role": "part", "op": "press", "slots": 1, "value": 150,
-		"color": Color("#e35d6a"), "stroke": Color("#82232c"),
+		"color": Color("#E8792F"), "stroke": Color("#8F4312"),
 		"inputs": [{"good": "capsule", "qty": 1}, {"good": "wedge", "qty": 1}]
 	},
 	"star": {
 		"id": "star", "name": "Star", "local": "Kriya Anyam",
 		"tier": 3, "role": "part", "op": "press", "slots": 1, "value": 200,
-		"color": Color("#f0b429"), "stroke": Color("#855f07"),
+		"color": Color("#EFA42A"), "stroke": Color("#94600E"),
 		"inputs": [{"good": "diamond", "qty": 2}]
 	},
 	"gem": {
 		"id": "gem", "name": "Gem", "local": "Permata Donorojo",
 		"tier": 3, "role": "part", "op": "press", "slots": 1, "value": 200,
-		"color": Color("#3ec4b9"), "stroke": Color("#196b64"),
+		"color": Color("#5F9B52"), "stroke": Color("#365E2D"),
 		"inputs": [{"good": "diamond", "qty": 1}, {"good": "shield", "qty": 1}]
 	},
 	"arrow": {
 		"id": "arrow", "name": "Arrow", "local": "Poros Bogie",
 		"tier": 3, "role": "part", "op": "press", "slots": 1, "value": 200,
-		"color": Color("#5f7ee0"), "stroke": Color("#263b80"),
+		"color": Color("#5F9B52"), "stroke": Color("#365E2D"),
 		"inputs": [{"good": "bar", "qty": 1}, {"good": "chevron", "qty": 1}]
 	},
 	"candle": {
 		"id": "candle", "name": "Candle", "local": "Porselen Halus",
 		"tier": 4, "role": "product", "op": "assemble", "slots": 2, "value": 150,
-		"color": Color("#f29d4b"), "stroke": Color("#8a4b10"),
+		"color": Color("#2E6BB0"), "stroke": Color("#1B416E"),
 		"inputs": [{"good": "drop", "qty": 1}, {"good": "block", "qty": 1}]
 	},
 	"fish": {
 		"id": "fish", "name": "Fish", "local": "Tuna Beku Tamperan",
 		"tier": 4, "role": "product", "op": "assemble", "slots": 2, "value": 200,
-		"color": Color("#43a9db"), "stroke": Color("#1b5c7d"),
+		"color": Color("#E0533D"), "stroke": Color("#8F2D1E"),
 		"inputs": [{"good": "capsule", "qty": 1}, {"good": "chevron", "qty": 1}]
 	},
 	"paddle": {
 		"id": "paddle", "name": "Paddle", "local": "Mesin Pertanian",
 		"tier": 4, "role": "product", "op": "assemble", "slots": 2, "value": 200,
-		"color": Color("#b576d6"), "stroke": Color("#5e2f78"),
+		"color": Color("#8B5A9C"), "stroke": Color("#53335E"),
 		"inputs": [{"good": "bar", "qty": 1}, {"good": "pebble", "qty": 1}]
 	},
 	"cart": {
-		"id": "cart", "name": "Cart", "local": "Vaagon Kargo",
+		"id": "cart", "name": "Cart", "local": "Gerbong Kargo",
 		"tier": 5, "role": "product", "op": "assemble", "slots": 2, "value": 200,
-		"color": Color("#d96548"), "stroke": Color("#7a2c18"),
+		"color": Color("#2E6BB0"), "stroke": Color("#1B416E"),
 		"inputs": [{"good": "bar", "qty": 1}, {"good": "dot", "qty": 2}]
 	},
 	"bus": {
 		"id": "bus", "name": "Bus", "local": "Bus & Kereta INKA",
 		"tier": 5, "role": "product", "op": "assemble", "slots": 2, "value": 200,
-		"color": Color("#3d8bd9"), "stroke": Color("#1a4978"),
+		"color": Color("#E0533D"), "stroke": Color("#8F2D1E"),
 		"inputs": [{"good": "capsule", "qty": 1}, {"good": "dot", "qty": 2}]
 	},
 	"rocket": {
 		"id": "rocket", "name": "Rocket", "local": "Lokomotif Ekspor",
 		"tier": 5, "role": "product", "op": "assemble", "slots": 2, "value": 250,
-		"color": Color("#e04f5f"), "stroke": Color("#7d1c27"),
+		"color": Color("#2E6BB0"), "stroke": Color("#1B416E"),
 		"inputs": [{"good": "bar", "qty": 1}, {"good": "chevron", "qty": 1}, {"good": "wedge", "qty": 1}]
 	},
 }

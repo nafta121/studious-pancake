@@ -8,12 +8,12 @@ config_version=5
 
 config/name="Incremental Traffic: Karesidenan Madiun"
 config/description="Simulasi rekayasa lalu lintas & logistik 2.5D berbasis peta dunia nyata Karesidenan Madiun (Kota Madiun, Kab. Madiun, Magetan, Ngawi, Ponorogo, Pacitan), dioptimalkan untuk Android."
-config/version="1.0.0"
+config/version="1.1.0"
 run/main_scene="res://scenes/main.tscn"
 config/features=PackedStringArray("4.7", "GL Compatibility")
 run/max_fps=60
-boot_splash/bg_color=Color(0.949, 0.925, 0.882, 1)
-boot_splash/image="res://assets/icons/icon_main.png"
+boot_splash/bg_color=Color(0.949, 0.941, 0.898, 1)
+boot_splash/image="res://assets/ui/title_logo.png"
 config/icon="res://icon.svg"
 config/quit_on_go_back=false
 
@@ -24,12 +24,16 @@ driver/mix_rate=44100
 
 [display]
 
-window/size/viewport_width=960
-window/size/viewport_height=540
+window/size/viewport_width=1152
+window/size/viewport_height=648
 window/stretch/mode="canvas_items"
 window/stretch/aspect="expand"
 window/handheld/orientation=6
 window/vsync/vsync_mode=1
+
+[gui]
+
+theme/custom="res://gui/theme.tres"
 
 [input_devices]
 
@@ -43,5 +47,5 @@ pointing/emulate_mouse_from_touch=true
 renderer/rendering_method="gl_compatibility"
 renderer/rendering_method.mobile="gl_compatibility"
 textures/vram_compression/import_etc2_astc=true
-environment/defaults/default_clear_color=Color(0.945, 0.922, 0.878, 1)
+environment/defaults/default_clear_color=Color(0.949, 0.941, 0.898, 1)
 2d/snap/snap_2d_transforms_to_pixel=false

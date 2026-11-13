@@ -224,6 +224,9 @@ func _on_world_tapped(world_pos: Vector2) -> void:
 func _prepare_smoke_test() -> void:
 	if _smoke_dir != "":
 		DirAccess.make_dir_recursive_absolute(_smoke_dir)
+	DisplayServer.window_set_size(Vector2i(1280, 720))
+	get_tree().root.size = Vector2i(1280, 720)
+
 	for m in sim.maps_list:
 		var mid := String(m["id"])
 		sim.load_map(mid, false)
@@ -234,8 +237,9 @@ func _prepare_smoke_test() -> void:
 		])
 
 	sim.load_map("karisidenan_madiun", false)
-	sim.cash = 125000
-	for ri in [1, 2, 3]:
+	sim.cash = 48200
+	sim.cash_history = [32400, 33800, 35100, 36900, 38200, 40500, 41900, 44100, 46300, 48200]
+	for ri in [1, 2]:
 		sim.regions[ri]["unlocked"] = true
 	sim._rebuild_lookups()
 	sim.recompute_all_routes()
@@ -245,47 +249,67 @@ func _prepare_smoke_test() -> void:
 			sim.add_truck_to_route(String(r_extra["id"]), false)
 			sim.add_truck_to_route(String(r_extra["id"]), false)
 	sim.map_static_dirty.emit()
-	for _s in range(240):
+	for _s in range(280):
 		sim._step_fixed(SimEngine.SIM_DT)
-	camera.focus_map({"x": 222.0, "y": -268.0, "zoom": 1.22}, sim.map_def["boundsWorld"])
+	# Seed a fresh delivery popup so the authentic dark/gold +$100 coin pill is visible in shot 1!
+	if sim.facilities.size() >= 4:
+		sim.spawn_toast(sim.facilities[3]["pos"] + Vector2(0, -18), "+$100", Color("FFD54A"))
+	camera.focus_map({"x": 225.0, "y": -265.0, "zoom": 1.32}, sim.map_def["boundsWorld"])
+	hud._layout_responsive()
 	hud.refresh_top_bar()
+	hud._refresh_goals_panel()
 
 func _step_smoke() -> void:
 	_smoke_frame += 1
 	if _smoke_frame == 8:
 		_save_shot_sync("godot_android_landscape_karisidenan.png")
-		map_view.selected_facility_id = String(sim.facilities[1]["id"])
+		# Select a multi-input Factory with outgoing route to show In->Ring->Out + Upgrades + Swap All!
+		var pick_fid := String(sim.facilities[1]["id"])
+		for f in sim.facilities:
+			if String(f["kind"]) == "factory" and sim.unlocked_regions.has(int(f["regionIndex"])):
+				pick_fid = String(f["id"])
+				break
+		map_view.selected_facility_id = pick_fid
+		if not sim.routes.is_empty():
+			hud._fac_swap_route_id = String(sim.routes[0]["id"])
 		hud.open_drawer("facility")
-	elif _smoke_frame == 15:
+		camera.focus_map({"x": 140.0, "y": -250.0, "zoom": 1.18}, sim.map_def["boundsWorld"])
+	elif _smoke_frame == 16:
 		_save_shot_sync("godot_android_inspector_madiun.png")
+		hud._fac_swap_route_id = ""
+		hud.open_drawer("routes")
+	elif _smoke_frame == 24:
+		_save_shot_sync("godot_android_overview_routes.png")
 		hud.close_drawer()
 		sim.night_mode = true
+		sim.day_clock_01 = 22.0 / 24.0
 		map_view._night_blend = 1.0
 		hud.dark_mode = true
 		hud._apply_styles()
 		map_view.set_theme_dark(true)
-		map_view.overlay_mode = "flow"
-	elif _smoke_frame == 22:
+		hud._toggle_overlay_mode("flow")
+	elif _smoke_frame == 32:
 		_save_shot_sync("godot_android_night_flow.png")
 		sim.night_mode = false
+		sim.day_clock_01 = 0.375
 		map_view._night_blend = 0.0
 		hud.dark_mode = false
 		hud._apply_styles()
 		map_view.set_theme_dark(false)
-		map_view.overlay_mode = "routes"
+		hud._toggle_overlay_mode("flow") # back to "none"
 		_on_map_selected("kab_pacitan")
 		for _s2 in range(180):
 			sim._step_fixed(SimEngine.SIM_DT)
-	elif _smoke_frame == 30:
+	elif _smoke_frame == 40:
 		_save_shot_sync("godot_android_pacitan_harbour.png")
-		DisplayServer.window_set_size(Vector2i(432, 900))
-		get_tree().root.size = Vector2i(432, 900)
+		DisplayServer.window_set_size(Vector2i(480, 960))
+		get_tree().root.size = Vector2i(480, 960)
 		_on_map_selected("kota_madiun")
 		for _s3 in range(160):
 			sim._step_fixed(SimEngine.SIM_DT)
 		hud._layout_responsive()
 		hud.open_drawer("maps")
-	elif _smoke_frame == 38:
+	elif _smoke_frame == 50:
 		_save_shot_sync("godot_android_portrait_kota_madiun.png")
 		print("SMOKE_TEST_OK maps=%d details=%s" % [_smoke_summary.size(), "; ".join(_smoke_summary)])
 		get_tree().quit(0)
