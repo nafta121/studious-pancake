@@ -53,6 +53,9 @@ func _ready() -> void:
 	hud.map_selected.connect(_on_map_selected)
 	hud.perf_preset_changed.connect(_on_perf_preset_changed)
 	hud.theme_toggled.connect(_on_theme_toggled)
+	hud.hide_flyovers_toggled.connect(func(on: bool): map_view.set_hide_flyovers(on))
+	hud.colorblind_toggled.connect(func(on: bool): map_view.set_colorblind_mode(on))
+	hud.cloud_shadows_toggled.connect(func(on: bool): map_view.set_cloud_shadows(on))
 	hud.focus_world_requested.connect(func(p: Vector2): camera.pan_to_world(p, 0.85))
 
 	if _smoke_mode:
@@ -73,6 +76,10 @@ func _process(delta: float) -> void:
 		sim.save_to_disk()
 
 func _notification(what: int) -> void:
+	if what == NOTIFICATION_WM_CLOSE_REQUEST:
+		if sfx != null:
+			sfx.shutdown()
+		return
 	if sim == null:
 		return
 	if what == NOTIFICATION_APPLICATION_PAUSED or what == NOTIFICATION_APPLICATION_FOCUS_OUT:
@@ -87,6 +94,8 @@ func _notification(what: int) -> void:
 			hud._on_toolbar_pressed("pan")
 		else:
 			sim.save_to_disk()
+			if sfx != null:
+				sfx.shutdown()
 			get_tree().quit()
 
 func _on_map_selected(map_id: String) -> void:
@@ -161,7 +170,7 @@ func _on_world_tapped(world_pos: Vector2) -> void:
 			hud.open_drawer("junction")
 		return
 
-	if tool in ["lanes_add", "lanes_remove", "one_way", "close_street"]:
+	if tool in ["lanes_add", "lanes_remove", "pocket", "turn_arrows", "one_way", "close_street"]:
 		var r_hit: Dictionary = RoadGeom.hit_test_road(sim.roads, sim.unlocked_regions, world_pos, road_r, false)
 		if r_hit.is_empty():
 			hud.show_toast_banner("Ketuk ruas jalan raya yang terbuka!", 2.0)
@@ -170,9 +179,13 @@ func _on_world_tapped(world_pos: Vector2) -> void:
 		map_view.selected_road_id = rid
 		var res_msg: String = ""
 		if tool == "lanes_add":
-			res_msg = sim.modify_road_lanes(rid, 1)
+			res_msg = sim.modify_road_lanes(rid, 1, hud.lane_dir_mode)
 		elif tool == "lanes_remove":
-			res_msg = sim.modify_road_lanes(rid, -1)
+			res_msg = sim.modify_road_lanes(rid, -1, hud.lane_dir_mode)
+		elif tool == "pocket":
+			res_msg = sim.cycle_road_pocket(rid)
+		elif tool == "turn_arrows":
+			res_msg = sim.cycle_road_turn_mask(rid, hud.lane_dir_mode != "backward")
 		elif tool == "one_way":
 			res_msg = sim.cycle_road_one_way(rid)
 		elif tool == "close_street":
@@ -227,6 +240,15 @@ func _prepare_smoke_test() -> void:
 	DisplayServer.window_set_size(Vector2i(1280, 720))
 	get_tree().root.size = Vector2i(1280, 720)
 
+	# 1. Validate 44-commodity conserved value catalog & marginal resale math
+	var cat_errs: Array[String] = GameCatalog.validate_catalog()
+	assert(cat_errs.is_empty(), "Catalog validation failed: " + ", ".join(cat_errs))
+	var buy_10: int = GameCatalog.compute_truck_buy_price("freighter", 9, 65)
+	var resale_10: int = GameCatalog.compute_truck_resale_price("freighter", 10, 66)
+	assert(resale_10 == int(round(float(buy_10) * 0.5)), "Marginal resale mismatch")
+	assert(int(GameCatalog.TRUCKS["lowloader"]["slot_cap"]) == 3, "Low-loader slot_cap must be 3")
+
+	# 2. Load & step all 7 Karesidenan Madiun maps
 	for m in sim.maps_list:
 		var mid := String(m["id"])
 		sim.load_map(mid, false)
@@ -236,6 +258,33 @@ func _prepare_smoke_test() -> void:
 			mid, sim.regions.size(), sim.roads.size(), sim.facilities.size(), sim.agents.size()
 		])
 
+	# 3. Exercise multi-phase lights, pocket lanes, turn masks, Same-way-back, alerts & save/restore schema v2
+	sim.load_map("karisidenan_madiun", false)
+	sim.cash = 68200
+	for ri in [1, 2]:
+		sim.regions[ri]["unlocked"] = true
+	sim._rebuild_lookups()
+	if not sim.junctions.is_empty():
+		var test_jid := String(sim.junctions[0]["id"])
+		sim.apply_junction_control(test_jid, "lights")
+		sim.add_light_phase(test_jid)
+		var conn_e: Array = sim.junctions[0]["connectedEdgeIds"]
+		if not conn_e.is_empty():
+			sim.cycle_light_arm_turn_mask(test_jid, 0, String(conn_e[0]))
+		sim.remove_traffic_lights(test_jid)
+	if not sim.roads.is_empty():
+		var test_rid := String(sim.roads[0]["id"])
+		sim.cycle_road_pocket(test_rid)
+		sim.cycle_road_turn_mask(test_rid, true)
+		sim.road_map[test_rid]["pocketLevel"] = 0
+		sim.road_map[test_rid]["turnMaskForward"] = 7
+	if not sim.routes.is_empty():
+		var test_rtid := String(sim.routes[0]["id"])
+		sim.set_route_same_way_back(test_rtid, false)
+		sim.set_route_same_way_back(test_rtid, true)
+	var _alerts_chk: Array[Dictionary] = sim.get_system_alerts()
+
+	# Prepare showcase scene for Karesidenan Madiun
 	sim.load_map("karisidenan_madiun", false)
 	sim.cash = 48200
 	sim.cash_history = [32400, 33800, 35100, 36900, 38200, 40500, 41900, 44100, 46300, 48200]
@@ -278,6 +327,8 @@ func _step_smoke() -> void:
 	elif _smoke_frame == 16:
 		_save_shot_sync("godot_android_inspector_madiun.png")
 		hud._fac_swap_route_id = ""
+		hud.open_drawer("alerts")
+		hud.open_drawer("settings")
 		hud.open_drawer("routes")
 	elif _smoke_frame == 24:
 		_save_shot_sync("godot_android_overview_routes.png")
@@ -301,10 +352,18 @@ func _step_smoke() -> void:
 		_on_map_selected("kab_pacitan")
 		for _s2 in range(180):
 			sim._step_fixed(SimEngine.SIM_DT)
+		# Inspect Pacitan Harbour briefly to verify Update 1.10 yardPile UI, then close for clean harbour shot
+		for fp in sim.facilities:
+			if String(fp["kind"]) == "harbour":
+				map_view.selected_facility_id = String(fp["id"])
+				hud.open_drawer("facility")
+				break
+		hud.close_drawer()
+		map_view.selected_facility_id = ""
 	elif _smoke_frame == 40:
 		_save_shot_sync("godot_android_pacitan_harbour.png")
 		# Close-up showcase on Kota Madiun (1280x720): swept Bezier junctions, 2-lane & 1-lane roundabouts,
-		# Kali Madiun bridges, lane markings/arrows, yield shark-teeth, corner signals & lane-connector bands!
+		# Kali Madiun bridges, lane markings/arrows, yield shark-teeth, corner signals & rule_hints shader!
 		sim.load_map("kota_madiun", false)
 		sim.cash = 65000
 		for ri2 in [1, 2]:
@@ -313,6 +372,8 @@ func _step_smoke() -> void:
 		sim._rebuild_lookups()
 		if sim.junction_map.has("km_sleko"):
 			sim.junction_map["km_sleko"]["control"] = "roundabout2"
+		if sim.road_map.has("km_r_pahlawan"):
+			sim.road_map["km_r_pahlawan"]["pocketLevel"] = 1
 		sim._refresh_network_geometry()
 		sim.recompute_all_routes()
 		if sim.facilities.size() >= 7:
@@ -342,7 +403,13 @@ func _step_smoke() -> void:
 		hud.open_drawer("maps")
 	elif _smoke_frame == 58:
 		_save_shot_sync("godot_android_portrait_kota_madiun.png")
-		print("SMOKE_TEST_OK maps=%d details=%s" % [_smoke_summary.size(), "; ".join(_smoke_summary)])
+		hud.close_drawer()
+		if sfx != null:
+			sfx.shutdown()
+	elif _smoke_frame == 60:
+		print("SMOKE_TEST_OK goods=%d maps=%d details=%s" % [
+			GameCatalog.GOODS.size(), _smoke_summary.size(), "; ".join(_smoke_summary)
+		])
 		get_tree().quit(0)
 
 func _save_shot_sync(filename: String) -> void:

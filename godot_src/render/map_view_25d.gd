@@ -2,10 +2,12 @@ class_name MapView25D
 extends Node2D
 
 ## Authentic Incremental Traffic 2.5D cartographic world renderer for Karesidenan Madiun.
-## Combines CONST world palette (#F2F0E5 parchment, #A9CDD8 rivers, #3C3F4A asphalt,
-## striped fields, scattered green/autumn trees, FactoryLook aprons + skylights,
-## ShapeGlyphs articulated trailers, FactoryLabel + RegionGate pins, and RewardPopups)
-## with GPU-cached TriBatch2D static layers for locked 60-120 FPS on Android.
+## Directly integrates original Incremental Traffic shaders (`city_building.gdshader` +
+## `city_reveal.gdshaderinc`, `city_shadow.gdshader`, `cloud_puff.gdshader`,
+## `rule_hints.gdshader`, and `water_ripples.gdshader`) via GPU `ArrayMesh` (`CUSTOM0`),
+## Update 1.10 overlay map wash, Hide Flyovers, Colour-blind palette, Station/Harbour
+## yard piles, and articulated TruckView (Express shrinking bonus bar, brake lights,
+## turn blinkers, and multi-slot cargo glyphs) at locked 60-120 FPS on Android.
 
 const COL_BG := Color("F2F0E5")
 const COL_ROAD := Color("3C3F4A")
@@ -27,6 +29,9 @@ var camera: Camera2D
 var overlay_mode: String = "none" # none | routes | traffic | flow | buildings | demand
 var dark_theme: bool = false
 var perf_preset: String = "balanced" # battery | balanced | ultra
+var hide_flyovers: bool = false
+var colorblind_mode: bool = false
+var cloud_shadows_enabled: bool = true
 
 var selected_facility_id: String = ""
 var selected_junction_id: String = ""
@@ -36,66 +41,135 @@ var route_draft_from_id: String = ""
 var active_tool: String = "pan"
 var hidden_route_ids: Dictionary = {} # route_id -> true (for OverlayBar Network filter)
 
-var _terrain_node: Node2D
-var _water_node: Node2D
-var _road_node: Node2D
-var _extrude_node: Node2D
-var _cloud_node: Node2D
-var _dynamic_node: Node2D
+var _terrain_node: _StaticBatchLayer
+var _water_node: _StaticBatchLayer
+var _road_node: _StaticBatchLayer
+var _shadow_node: _MeshBatchLayer
+var _building_node: _MeshBatchLayer
+var _cloud_veil_node: _StaticBatchLayer
+var _cloud_puff_node: _MeshBatchLayer
+var _rule_hint_node: _MeshBatchLayer
+var _dynamic_node: _DynamicWorldDrawer
 
 var _water_mat: ShaderMaterial
-var _extrude_mat: ShaderMaterial
+var _shadow_mat: ShaderMaterial
+var _building_mat: ShaderMaterial
+var _cloud_puff_mat: ShaderMaterial
+var _rule_hint_mat: ShaderMaterial
 
 var _terrain_batch := TriBatch2D.new()
 var _water_batch := TriBatch2D.new()
 var _road_batch := TriBatch2D.new()
-var _extrude_batch := TriBatch2D.new()
-var _cloud_batch := TriBatch2D.new()
+var _shadow_batch := TriBatch2D.new()
+var _building_batch := TriBatch2D.new()
+var _cloud_veil_batch := TriBatch2D.new()
+var _cloud_puff_batch := TriBatch2D.new()
+var _rule_hint_batch := TriBatch2D.new()
+
+var _shadow_mesh := ArrayMesh.new()
+var _building_mesh := ArrayMesh.new()
+var _cloud_puff_mesh := ArrayMesh.new()
+var _rule_hint_mesh := ArrayMesh.new()
 
 var _night_blend: float = 0.0
+var _cloud_clock: float = 0.0
 var _static_dirty: bool = true
+var _last_hint_sig: String = "__init__"
 var _ui_font: Font
 
 func setup(sim_engine: SimEngine, cam: Camera2D) -> void:
 	sim = sim_engine
 	camera = cam
-	sim.map_static_dirty.connect(_on_static_dirty)
+	if not sim.map_static_dirty.is_connected(_on_static_dirty):
+		sim.map_static_dirty.connect(_on_static_dirty)
 	if ResourceLoader.exists("res://gui/theme_studies/fonts/Jost-Variable.ttf"):
 		_ui_font = load("res://gui/theme_studies/fonts/Jost-Variable.ttf") as Font
 	else:
 		_ui_font = ThemeDB.fallback_font
 
 	_terrain_node = _StaticBatchLayer.new()
-	(_terrain_node as _StaticBatchLayer).batch = _terrain_batch
-	_water_node = _StaticBatchLayer.new()
-	(_water_node as _StaticBatchLayer).batch = _water_batch
-	_road_node = _StaticBatchLayer.new()
-	(_road_node as _StaticBatchLayer).batch = _road_batch
-	_extrude_node = _StaticBatchLayer.new()
-	(_extrude_node as _StaticBatchLayer).batch = _extrude_batch
-	_cloud_node = _StaticBatchLayer.new()
-	(_cloud_node as _StaticBatchLayer).batch = _cloud_batch
-	_dynamic_node = _DynamicWorldDrawer.new()
-	(_dynamic_node as _DynamicWorldDrawer).owner_view = self
+	_terrain_node.batch = _terrain_batch
 
-	var water_shader := load("res://shaders/water_ripples.gdshader") as Shader
+	_water_node = _StaticBatchLayer.new()
+	_water_node.batch = _water_batch
+
+	_road_node = _StaticBatchLayer.new()
+	_road_node.batch = _road_batch
+
+	_shadow_node = _MeshBatchLayer.new()
+	_shadow_node.mesh = _shadow_mesh
+
+	_building_node = _MeshBatchLayer.new()
+	_building_node.mesh = _building_mesh
+
+	_cloud_veil_node = _StaticBatchLayer.new()
+	_cloud_veil_node.batch = _cloud_veil_batch
+
+	_cloud_puff_node = _MeshBatchLayer.new()
+	_cloud_puff_node.mesh = _cloud_puff_mesh
+
+	_rule_hint_node = _MeshBatchLayer.new()
+	_rule_hint_node.mesh = _rule_hint_mesh
+
+	_dynamic_node = _DynamicWorldDrawer.new()
+	_dynamic_node.owner_view = self
+
 	_water_mat = ShaderMaterial.new()
-	_water_mat.shader = water_shader
+	_water_mat.shader = load("res://shaders/water_ripples.gdshader") as Shader
 	_water_node.material = _water_mat
 
-	var extrude_shader := load("res://shaders/extrude_25d.gdshader") as Shader
-	_extrude_mat = ShaderMaterial.new()
-	_extrude_mat.shader = extrude_shader
-	_extrude_node.material = _extrude_mat
+	_shadow_mat = ShaderMaterial.new()
+	_shadow_mat.shader = load("res://shaders/city_shadow.gdshader") as Shader
+	_shadow_node.material = _shadow_mat
+
+	_building_mat = ShaderMaterial.new()
+	_building_mat.shader = load("res://shaders/city_building.gdshader") as Shader
+	_building_node.material = _building_mat
+
+	_cloud_puff_mat = ShaderMaterial.new()
+	_cloud_puff_mat.shader = load("res://shaders/cloud_puff.gdshader") as Shader
+	_cloud_puff_node.material = _cloud_puff_mat
+
+	_rule_hint_mat = ShaderMaterial.new()
+	_rule_hint_mat.shader = load("res://shaders/rule_hints.gdshader") as Shader
+	_rule_hint_node.material = _rule_hint_mat
 
 	add_child(_terrain_node)
 	add_child(_water_node)
 	add_child(_road_node)
-	add_child(_extrude_node)
-	add_child(_cloud_node)
+	add_child(_shadow_node)
+	add_child(_building_node)
+	add_child(_cloud_veil_node)
+	add_child(_cloud_puff_node)
+	add_child(_rule_hint_node)
 	add_child(_dynamic_node)
 
 	_static_dirty = true
+	_last_hint_sig = "__init__"
+
+func _exit_tree() -> void:
+	if sim != null and sim.map_static_dirty.is_connected(_on_static_dirty):
+		sim.map_static_dirty.disconnect(_on_static_dirty)
+	for n in [_water_node, _shadow_node, _building_node, _cloud_puff_node, _rule_hint_node]:
+		if n != null:
+			n.material = null
+	for m in [_shadow_mesh, _building_mesh, _cloud_puff_mesh, _rule_hint_mesh]:
+		if m != null:
+			m.clear_surfaces()
+	if _shadow_node != null:
+		_shadow_node.mesh = null
+	if _building_node != null:
+		_building_node.mesh = null
+	if _cloud_puff_node != null:
+		_cloud_puff_node.mesh = null
+	if _rule_hint_node != null:
+		_rule_hint_node.mesh = null
+	_water_mat = null
+	_shadow_mat = null
+	_building_mat = null
+	_cloud_puff_mat = null
+	_rule_hint_mat = null
+	_ui_font = null
 
 func _on_static_dirty() -> void:
 	_static_dirty = true
@@ -110,24 +184,64 @@ func set_perf_preset(preset: String) -> void:
 		perf_preset = preset
 		_static_dirty = true
 
+func set_hide_flyovers(hide_on: bool) -> void:
+	if hide_flyovers != hide_on:
+		hide_flyovers = hide_on
+		_static_dirty = true
+
+func set_colorblind_mode(cb_on: bool) -> void:
+	colorblind_mode = cb_on
+
+func set_cloud_shadows(clouds_on: bool) -> void:
+	cloud_shadows_enabled = clouds_on
+	if _cloud_puff_node != null:
+		_cloud_puff_node.visible = clouds_on and perf_preset != "battery"
+
 func _process(delta: float) -> void:
 	if sim == null or camera == null:
 		return
 	if _static_dirty:
 		_rebuild_static_batches()
 		_static_dirty = false
+		_last_hint_sig = "__dirty__"
+
+	var hint_sig := "%s|%s|%s" % [active_tool, selected_route_id, route_draft_from_id]
+	if hint_sig != _last_hint_sig:
+		_last_hint_sig = hint_sig
+		_rebuild_rule_hints_batch()
 
 	var target_night: float = 1.0 if sim.night_mode else 0.0
 	_night_blend = lerpf(_night_blend, target_night, minf(1.0, delta * 4.5))
+	_cloud_clock += delta * (0.45 if perf_preset == "battery" else 1.0)
 
-	_extrude_mat.set_shader_parameter("cam_center", camera.global_position)
-	_extrude_mat.set_shader_parameter("cam_zoom", camera.zoom.x)
-	_extrude_mat.set_shader_parameter("lean_strength", 0.00032 if perf_preset == "battery" else 0.00050)
-	_extrude_mat.set_shader_parameter("night_blend", _night_blend)
-	_extrude_mat.set_shader_parameter("day_clock", sim.day_clock_01)
+	# Authentic directional sun vector & shadow offset driven by day_clock_01
+	var day_ang: float = (sim.day_clock_01 - 0.25) * TAU
+	var sun_dir := Vector2(cos(day_ang), -0.58 - 0.35 * sin(day_ang)).normalized()
+	var sunlit: float = clampf(1.0 - _night_blend * 0.88, 0.12, 1.0)
+	var shadow_len: float = lerpf(0.30, 0.14, _night_blend)
+	var sun_offset: Vector2 = -sun_dir * shadow_len
 
-	_water_mat.set_shader_parameter("night_blend", _night_blend)
-	_water_mat.set_shader_parameter("shimmer_amp", 0.015 if perf_preset == "battery" else 0.055)
+	if _building_mat != null:
+		_building_mat.set_shader_parameter("cam_center", camera.global_position)
+		_building_mat.set_shader_parameter("cam_zoom", camera.zoom.x)
+		_building_mat.set_shader_parameter("lean_scale", 0.00032 if perf_preset == "battery" else 0.00052)
+		_building_mat.set_shader_parameter("sun_dir", sun_dir)
+		_building_mat.set_shader_parameter("sunlit", sunlit)
+		_building_mat.set_shader_parameter("night", _night_blend)
+		_building_mat.set_shader_parameter("reveal_clock", sim.real_time_sec)
+		_building_mat.set_shader_parameter("grow_clock", sim.real_time_sec)
+
+	if _shadow_mat != null:
+		_shadow_mat.set_shader_parameter("sun_offset", sun_offset)
+		_shadow_mat.set_shader_parameter("reveal_clock", sim.real_time_sec)
+		_shadow_mat.set_shader_parameter("grow_clock", sim.real_time_sec)
+
+	if _cloud_puff_mat != null:
+		_cloud_puff_mat.set_shader_parameter("clock", _cloud_clock)
+
+	if _water_mat != null:
+		_water_mat.set_shader_parameter("night_blend", _night_blend)
+		_water_mat.set_shader_parameter("shimmer_amp", 0.018 if perf_preset == "battery" else 0.058)
 
 	var bg_day := Color("20242C") if dark_theme else COL_BG
 	var bg_night := Color("121620")
@@ -141,12 +255,82 @@ func get_world_frustum() -> Rect2:
 	var margin := Vector2(110.0, 110.0)
 	return Rect2(camera.global_position - half_world - margin, (half_world + margin) * 2.0)
 
+func _rebuild_rule_hints_batch() -> void:
+	_rule_hint_batch.clear()
+	if sim == null or _rule_hint_node == null:
+		return
+
+	var tool_s := active_tool
+	var over_col := Color(0.18, 0.52, 0.96, 1.0)
+	if tool_s == "route":
+		over_col = Color(0.24, 0.68, 0.40, 1.0)
+	elif tool_s == "close_street":
+		over_col = Color(0.82, 0.24, 0.26, 1.0)
+
+	if _rule_hint_mat != null:
+		_rule_hint_mat.set_shader_parameter("over_color", over_col)
+
+	if tool_s in ["yield", "roundabout", "lights"]:
+		for j_h in sim.junctions:
+			if not sim.unlocked_regions.has(int(j_h["regionIndex"])):
+				continue
+			var arms_h: Array = (j_h.get("geom", {}) as Dictionary).get("arms", [])
+			if arms_h.size() < 3:
+				continue
+			var r_world: float = maxf(14.0, float((j_h.get("geom", {}) as Dictionary).get("r_outer", 11.0)) + 3.5)
+			_rule_hint_batch.add_rule_hint_ring(j_h["pos"], r_world, 28, 0.0)
+	elif tool_s in ["lanes_add", "lanes_remove", "one_way", "close_street", "pocket", "turn_arrows"]:
+		for r_h in sim.roads:
+			if not bool(r_h["isBuilt"]) or not sim.unlocked_regions.has(int(r_h["regionIndex"])):
+				continue
+			var rlen: float = float(r_h["lengthPx"])
+			var s0: float = float(r_h.get("trimStart", 0.0)) + 2.0
+			var s1: float = rlen - float(r_h.get("trimEnd", 0.0)) - 2.0
+			if s1 - s0 >= 8.0:
+				var sub_pts: PackedVector2Array = RoadGeom.slice_polyline(r_h["pts"], r_h["cum_len"], s0, s1)
+				_rule_hint_batch.add_rule_hint_dash_polyline(sub_pts, 0.0)
+	elif tool_s == "route":
+		for f_h in sim.facilities:
+			if not sim.unlocked_regions.has(int(f_h["regionIndex"])):
+				continue
+			if route_draft_from_id == "":
+				if f_h["outputGood"] != null:
+					_rule_hint_batch.add_rule_hint_sign_ring(f_h["pos"], 24, 0.0)
+			elif String(f_h["id"]) != route_draft_from_id:
+				_rule_hint_batch.add_rule_hint_sign_ring(f_h["pos"], 24, 0.0)
+
+	if selected_route_id != "":
+		var sel_rt: Dictionary = sim.get_route(selected_route_id)
+		if not sel_rt.is_empty():
+			for wp in sel_rt["waypoints"]:
+				if sim.junction_map.has(String(wp)):
+					_rule_hint_batch.add_rule_hint_dot(sim.junction_map[String(wp)]["pos"], 0.0)
+
+	_rule_hint_batch.upload_to_mesh(_rule_hint_mesh)
+	_rule_hint_node.visible = not _rule_hint_batch.is_empty()
+	_rule_hint_node.queue_redraw()
+
+func _compute_region_reveal_c0(reg_idx: int, world_pos: Vector2) -> Color:
+	if reg_idx <= 0 or reg_idx >= sim.regions.size():
+		return Color(0.0, world_pos.x, world_pos.y, 0.0)
+	var reg: Dictionary = sim.regions[reg_idx]
+	if not bool(reg["unlocked"]):
+		return Color(0.0, world_pos.x, world_pos.y, 0.0)
+	var unl_t: float = float(reg.get("unlockedAtRealSec", 0.0))
+	if unl_t <= 0.001:
+		return Color(0.0, world_pos.x, world_pos.y, 0.0)
+	var rc: Vector2 = reg.get("center_vec", world_pos)
+	var dist_delay: float = clampf(world_pos.distance_to(rc) * 0.0016, 0.0, 0.55)
+	return Color(unl_t + dist_delay, world_pos.x, world_pos.y, 1.0)
+
 func _rebuild_static_batches() -> void:
 	_terrain_batch.clear()
 	_water_batch.clear()
 	_road_batch.clear()
-	_extrude_batch.clear()
-	_cloud_batch.clear()
+	_shadow_batch.clear()
+	_building_batch.clear()
+	_cloud_veil_batch.clear()
+	_cloud_puff_batch.clear()
 
 	var is_dark: bool = dark_theme or sim.night_mode
 	var rng := RandomNumberGenerator.new()
@@ -167,7 +351,7 @@ func _rebuild_static_batches() -> void:
 			_terrain_batch.add_polygon_safe(pv, base_col)
 			_terrain_batch.add_dashed_polyline(pv, 1.8 if unlocked else 2.2, border_col, 9.0, 7.0)
 
-	# 2. Striped Agricultural Fields & Forest / Park Patches (like game_town-wide.webp)
+	# 2. Striped Agricultural Fields & Forest / Park Patches
 	var p_idx: int = 0
 	for p in sim.patches:
 		p_idx += 1
@@ -193,7 +377,6 @@ func _rebuild_static_batches() -> void:
 		p_col.a = 0.78 if unl else 0.30
 		_terrain_batch.add_rect_rot(pc, pw, ph, pang, p_col)
 
-		# Furrow stripes on agricultural fields (matching game_town-wide.webp!)
 		if unl and kind_s != "jati" and pw >= 28.0 and ph >= 18.0:
 			var ux := Vector2(cos(pang), sin(pang))
 			var uy := Vector2(-sin(pang), cos(pang))
@@ -206,7 +389,6 @@ func _rebuild_static_batches() -> void:
 				_terrain_batch.add_polyline(PackedVector2Array([a_pt, b_pt]), 1.1, stripe_col, false, false)
 				y_cur += step_y
 
-		# Scattered circular trees on forest/park/jati patches (zero runtime CPU cost!)
 		if perf_preset != "battery" and (kind_s == "jati" or kind_s == "alun_alun" or p_idx % 2 == 1):
 			var tree_count: int = clampi(int((pw * ph) / 210.0), 4, 26)
 			if not unl:
@@ -262,11 +444,13 @@ func _rebuild_static_batches() -> void:
 		_terrain_batch.add_dashed_polyline(rpts, 6.2, tie_col, 2.0, 4.8, 0.0)
 		_terrain_batch.add_polyline(rpts, 2.0, rail_col, false, false)
 
-	# 5 & 6. Multi-Pass Authentic Incremental Traffic RoadBed, Swept Junctions, Roundabouts, Update 1.9 Bridges & RoadPaint
+	# 5 & 6. Multi-Pass Authentic RoadBed, Swept Junctions, Roundabouts, Pockets, Bridges & RoadPaint
 	_build_roads_and_junctions_batches(is_dark)
 
-	# 7. Town Houses & Commercial Blocks (authentic muted slate, terracotta & sand roofs from game_town-wide.webp)
+	# 7. Town Houses & Commercial Blocks via authentic `city_building.gdshader` + `city_shadow.gdshader`
 	var skip_minor_houses: bool = perf_preset == "battery"
+	var use_shadows: bool = perf_preset != "battery"
+	var sh_target: TriBatch2D = _shadow_batch if use_shadows else null
 	var town_roofs := [
 		Color("6A6E7A"), Color("7E6358"), Color("8C6D53"),
 		Color("596370"), Color("9E6B55"), Color("787B84")
@@ -276,34 +460,39 @@ func _rebuild_static_batches() -> void:
 		b_idx += 1
 		if skip_minor_houses and (b_idx % 2 == 1) and String(b["kind"]) == "house":
 			continue
-		var b_unl: bool = sim.unlocked_regions.has(int(b["regionIndex"]))
+		var b_reg: int = int(b["regionIndex"])
+		var b_unl: bool = sim.unlocked_regions.has(b_reg)
+		var b_pos := Vector2(float(b["x"]), float(b["y"]))
 		var r_col: Color = town_roofs[b_idx % town_roofs.size()]
 		var w_col := Color("E4DFD3") if not is_dark else Color("3B404C")
 		if not b_unl:
 			r_col = r_col.lerp(COL_BG, 0.65)
 			w_col = w_col.lerp(COL_BG, 0.65)
-		var win_seed: float = (0.12 + fmod(float(b_idx) * 0.173, 0.82)) if b_unl else 0.0
-		_extrude_batch.add_extruded_box_25d(
-			Vector2(float(b["x"]), float(b["y"])),
+		var win_seed: float = (0.14 + fmod(float(b_idx) * 0.173, 0.82)) if b_unl else 0.0
+		var rev_c0: Color = _compute_region_reveal_c0(b_reg, b_pos) if b_unl else Color(0.0, b_pos.x, b_pos.y, 0.0)
+		_building_batch.add_city_building_25d(
+			b_pos,
 			float(b["w"]),
 			float(b["d"]),
 			float(b["angle"]),
-			float(b["h"]) * (0.85 if b_unl else 0.38),
+			float(b["h"]) * (0.88 if b_unl else 0.38),
 			r_col,
 			w_col,
-			win_seed
+			win_seed,
+			rev_c0,
+			sh_target if b_unl else null
 		)
 
-	# 8. Industrial Facilities (FactoryLook: concrete pad + dark asphalt bay apron + white bay lines + Teal/Ink/Brick roof + skylights!)
+	# 8. Industrial Facilities (FactoryLook + elastic GROW_GLOW when upgraded!)
 	var f_idx: int = 0
 	for f in sim.facilities:
 		f_idx += 1
-		var f_unl: bool = sim.unlocked_regions.has(int(f["regionIndex"]))
+		var f_reg: int = int(f["regionIndex"])
+		var f_unl: bool = sim.unlocked_regions.has(f_reg)
 		var fp: Vector2 = f["pos"]
 		var fk := String(f["kind"])
 		var exp_scale: float = 1.24 if int(f["upgrades"].get("expand", 0)) > 0 else 1.0
 
-		# Concrete lot + dark asphalt truck loading apron with white bay markings (matching game_town-wide.webp!)
 		var lot_col := Color("DCD8CE") if not is_dark else Color("2E333E")
 		var apron_col := Color("343741") if not is_dark else Color("23262F")
 		if not f_unl:
@@ -320,7 +509,6 @@ func _rebuild_static_batches() -> void:
 					1.0, Color(COL_LANE_MARK, 0.72), false, false
 				)
 
-		# Authentic FactoryLook roof colors: Teal #3F8C7E (factories), Dark Ink #353B4D (suppliers), Brick/Slate (stations/harbours)
 		var r_col := Color("3F8C7E")
 		if fk == "supplier":
 			r_col = Color("353B4D")
@@ -335,15 +523,27 @@ func _rebuild_static_batches() -> void:
 			r_col = r_col.lerp(COL_BG, 0.65)
 			w_col = w_col.lerp(COL_BG, 0.65)
 
-		var fh: float = 14.5 if f_unl else 6.5
+		var fh: float = 14.8 if f_unl else 6.5
 		var fw: float = 25.0 * exp_scale
 		var fd: float = 15.5 * exp_scale
 		var hall_c: Vector2 = fp + Vector2(0, -2.5 * exp_scale)
-		_extrude_batch.add_extruded_box_25d(
+		var last_grow: float = float(f.get("lastGrowSec", -999.0))
+		var fac_c0: Color
+		if f_unl and last_grow > 0.0:
+			# Negative mode triggers elastic grow squeeze + golden GROW_GLOW in city_building.gdshader!
+			fac_c0 = Color(last_grow, hall_c.x, hall_c.y, -1.72)
+		elif f_unl:
+			fac_c0 = _compute_region_reveal_c0(f_reg, hall_c)
+		else:
+			fac_c0 = Color(0.0, hall_c.x, hall_c.y, 0.0)
+
+		_building_batch.add_city_building_25d(
 			hall_c, fw, fd, 0.0, fh, r_col, w_col,
-			0.25 + float(f_idx) * 0.13 if f_unl else 0.0
+			0.28 + fmod(float(f_idx) * 0.19, 0.68) if f_unl else 0.0,
+			fac_c0,
+			sh_target if f_unl else null
 		)
-		# Parallel white roof skylight stripes extruded at roof peak height!
+		# Parallel white roof skylight stripes extruded at roof peak height (`kind = 0`)
 		if f_unl:
 			var uv_sky := Vector2(fh * 1.14, 0.0)
 			var sky_col := Color("D9ECE9") if fk == "factory" else Color("DCE1EA")
@@ -352,25 +552,61 @@ func _rebuild_static_batches() -> void:
 				var s1 := hall_c + Vector2(fw * 0.36, sy - 1.1)
 				var s2 := hall_c + Vector2(fw * 0.36, sy + 1.1)
 				var s3 := hall_c + Vector2(-fw * 0.36, sy + 1.1)
-				_extrude_batch.add_quad(s0, s1, s2, s3, sky_col, uv_sky, uv_sky, uv_sky, uv_sky)
+				_building_batch.add_quad_c0(s0, s1, s2, s3, sky_col, uv_sky, uv_sky, uv_sky, uv_sky, fac_c0, fac_c0, fac_c0, fac_c0)
 
-	# 9. Soft Cloud Mist Veil over Locked Regions (matching right side of game_trucks.webp!)
+	# 9. Soft Cloud Mist Veil + Authentic Drifting `cloud_puff.gdshader` Puffs over Locked Regions
+	var puff_idx: int = 0
 	for reg in sim.regions:
 		if bool(reg["unlocked"]):
 			continue
-		var mist_fill := Color(0.97, 0.97, 0.95, 0.56) if not is_dark else Color(0.09, 0.11, 0.15, 0.58)
-		var puff_col := Color(0.99, 0.99, 0.98, 0.42) if not is_dark else Color(0.13, 0.16, 0.22, 0.42)
+		var mist_fill := Color(0.97, 0.97, 0.95, 0.54) if not is_dark else Color(0.09, 0.11, 0.15, 0.58)
+		var puff_col := Color(0.99, 0.99, 0.98, 0.44) if not is_dark else Color(0.15, 0.18, 0.24, 0.44)
 		for pv in reg["poly_vecs"]:
-			_cloud_batch.add_polygon_safe(pv, mist_fill)
-			var step_i: int = maxi(1, pv.size() / 18)
+			_cloud_veil_batch.add_polygon_safe(pv, mist_fill)
+			var step_i: int = maxi(1, pv.size() / 16)
 			for pi in range(0, pv.size(), step_i):
-				_cloud_batch.add_circle(pv[pi], 26.0, puff_col, 14)
+				puff_idx += 1
+				var phase_p: float = float(puff_idx) * 1.37
+				var gust_p: float = float(puff_idx) * 0.83
+				_cloud_puff_batch.add_cloud_puff(pv[pi], 32.0 + float(puff_idx % 4) * 5.0, phase_p, gust_p, puff_col)
+
+	_shadow_batch.upload_to_mesh(_shadow_mesh)
+	_building_batch.upload_to_mesh(_building_mesh)
+	_cloud_puff_batch.upload_to_mesh(_cloud_puff_mesh)
+
+	_shadow_node.visible = use_shadows and _shadow_mesh.get_surface_count() > 0
+	_cloud_puff_node.visible = cloud_shadows_enabled and perf_preset != "battery" and _cloud_puff_mesh.get_surface_count() > 0
 
 	_terrain_node.queue_redraw()
 	_water_node.queue_redraw()
 	_road_node.queue_redraw()
-	_extrude_node.queue_redraw()
-	_cloud_node.queue_redraw()
+	_shadow_node.queue_redraw()
+	_building_node.queue_redraw()
+	_cloud_veil_node.queue_redraw()
+	_cloud_puff_node.queue_redraw()
+
+func _slice_ground_intervals(s0: float, s1: float, excluded_spans: Array) -> Array:
+	if s1 - s0 < 1.0:
+		return []
+	if excluded_spans.is_empty():
+		return [[s0, s1]]
+	var intervals: Array = [[s0, s1]]
+	for sp in excluded_spans:
+		var ex0: float = float(sp[0])
+		var ex1: float = float(sp[1])
+		var next_list: Array = []
+		for iv in intervals:
+			var a: float = float(iv[0])
+			var b: float = float(iv[1])
+			if ex1 <= a or ex0 >= b:
+				next_list.append([a, b])
+			else:
+				if ex0 - a >= 1.0:
+					next_list.append([a, ex0])
+				if b - ex1 >= 1.0:
+					next_list.append([ex1, b])
+		intervals = next_list
+	return intervals
 
 func _build_roads_and_junctions_batches(is_dark: bool) -> void:
 	var lht: bool = sim.left_hand_traffic
@@ -406,16 +642,17 @@ func _build_roads_and_junctions_batches(is_dark: bool) -> void:
 					sh_pts[i] = b_pts[i] + Vector2(3.6, 4.6)
 				_road_batch.add_smooth_strip(sh_pts, rw + 6.4, shadow_bridge, false, false)
 
-		for osp in r.get("overpassSpans", []):
-			var o_pts: PackedVector2Array = RoadGeom.slice_polyline(pts, cum, float(osp[0]), float(osp[1]))
-			if o_pts.size() >= 2:
-				var osh_pts := PackedVector2Array()
-				osh_pts.resize(o_pts.size())
-				for i in range(o_pts.size()):
-					osh_pts[i] = o_pts[i] + Vector2(4.4, 5.6)
-				_road_batch.add_smooth_strip(osh_pts, rw + 7.2, shadow_bridge, false, false)
+		if not hide_flyovers:
+			for osp in r.get("overpassSpans", []):
+				var o_pts: PackedVector2Array = RoadGeom.slice_polyline(pts, cum, float(osp[0]), float(osp[1]))
+				if o_pts.size() >= 2:
+					var osh_pts := PackedVector2Array()
+					osh_pts.resize(o_pts.size())
+					for i in range(o_pts.size()):
+						osh_pts[i] = o_pts[i] + Vector2(4.4, 5.6)
+					_road_batch.add_smooth_strip(osh_pts, rw + 7.2, shadow_bridge, false, false)
 
-	# Pass 5.1a: Continuous Sidewalk Layer (roads + swept junction fillets + roundabout outer rings)
+	# Pass 5.1a: Continuous Sidewalk Layer (roads + turn pockets + swept junction fillets + roundabout outer rings)
 	var bg_mute: Color = Color("161920") if is_dark else COL_BG
 	for r in sim.roads:
 		if not bool(r["isBuilt"]):
@@ -426,9 +663,16 @@ func _build_roads_and_junctions_batches(is_dark: bool) -> void:
 		var rlen: float = float(r["lengthPx"])
 		var bed_s0: float = maxf(0.0, float(r.get("trimStart", 0.0)) - 1.8)
 		var bed_s1: float = minf(rlen, rlen - float(r.get("trimEnd", 0.0)) + 1.8)
-		if bed_s1 - bed_s0 >= 1.0:
-			var bed_pts: PackedVector2Array = RoadGeom.slice_polyline(r["pts"], r["cum_len"], bed_s0, bed_s1)
+		var excl: Array = r.get("overpassSpans", []) if hide_flyovers else []
+		for iv in _slice_ground_intervals(bed_s0, bed_s1, excl):
+			var bed_pts: PackedVector2Array = RoadGeom.slice_polyline(r["pts"], r["cum_len"], float(iv[0]), float(iv[1]))
 			_road_batch.add_smooth_strip(bed_pts, rw + 4.8, sw_c, false, false)
+		var pk_lvl: int = int(r.get("pocketLevel", 0))
+		if pk_lvl > 0 and r_unl and bed_s1 - bed_s0 >= 28.0:
+			var pk_len: float = minf((bed_s1 - bed_s0) * 0.42, 16.0 + 11.0 * float(pk_lvl))
+			for pk_iv in [[bed_s0, bed_s0 + pk_len], [bed_s1 - pk_len, bed_s1]]:
+				var pk_pts: PackedVector2Array = RoadGeom.slice_polyline(r["pts"], r["cum_len"], float(pk_iv[0]), float(pk_iv[1]))
+				_road_batch.add_smooth_strip(pk_pts, rw + RoadGeom.LANE_WIDTH + 4.8, sw_c, false, false)
 
 	for j in sim.junctions:
 		var j_unl: bool = sim.unlocked_regions.has(int(j["regionIndex"]))
@@ -447,7 +691,7 @@ func _build_roads_and_junctions_batches(is_dark: bool) -> void:
 		elif gkind == "culdesac":
 			_road_batch.add_circle(jp, float(geom.get("radius", 5.0)) + 2.5, sw_c, 18)
 
-	# Pass 5.1b: Continuous Curb Layer (roads + swept junction curbs + roundabout outer curbs)
+	# Pass 5.1b: Continuous Curb Layer
 	for r in sim.roads:
 		if not bool(r["isBuilt"]):
 			continue
@@ -457,9 +701,16 @@ func _build_roads_and_junctions_batches(is_dark: bool) -> void:
 		var rlen: float = float(r["lengthPx"])
 		var bed_s0: float = maxf(0.0, float(r.get("trimStart", 0.0)) - 1.8)
 		var bed_s1: float = minf(rlen, rlen - float(r.get("trimEnd", 0.0)) + 1.8)
-		if bed_s1 - bed_s0 >= 1.0:
-			var bed_pts: PackedVector2Array = RoadGeom.slice_polyline(r["pts"], r["cum_len"], bed_s0, bed_s1)
+		var excl: Array = r.get("overpassSpans", []) if hide_flyovers else []
+		for iv in _slice_ground_intervals(bed_s0, bed_s1, excl):
+			var bed_pts: PackedVector2Array = RoadGeom.slice_polyline(r["pts"], r["cum_len"], float(iv[0]), float(iv[1]))
 			_road_batch.add_smooth_strip(bed_pts, rw + 2.1, cb_c, false, false)
+		var pk_lvl: int = int(r.get("pocketLevel", 0))
+		if pk_lvl > 0 and r_unl and bed_s1 - bed_s0 >= 28.0:
+			var pk_len: float = minf((bed_s1 - bed_s0) * 0.42, 16.0 + 11.0 * float(pk_lvl))
+			for pk_iv in [[bed_s0, bed_s0 + pk_len], [bed_s1 - pk_len, bed_s1]]:
+				var pk_pts: PackedVector2Array = RoadGeom.slice_polyline(r["pts"], r["cum_len"], float(pk_iv[0]), float(pk_iv[1]))
+				_road_batch.add_smooth_strip(pk_pts, rw + RoadGeom.LANE_WIDTH + 2.1, cb_c, false, false)
 
 	for j in sim.junctions:
 		var j_unl: bool = sim.unlocked_regions.has(int(j["regionIndex"]))
@@ -478,7 +729,7 @@ func _build_roads_and_junctions_batches(is_dark: bool) -> void:
 		elif gkind == "culdesac":
 			_road_batch.add_circle(jp, float(geom.get("radius", 5.0)) + 1.1, cb_c, 18)
 
-	# Pass 5.2: Unified Monolithic Asphalt Surface (zero curb seams across intersections or roundabouts!)
+	# Pass 5.2: Unified Monolithic Asphalt Surface
 	for r in sim.roads:
 		if not bool(r["isBuilt"]):
 			continue
@@ -488,9 +739,16 @@ func _build_roads_and_junctions_batches(is_dark: bool) -> void:
 		var rlen: float = float(r["lengthPx"])
 		var bed_s0: float = maxf(0.0, float(r.get("trimStart", 0.0)) - 1.8)
 		var bed_s1: float = minf(rlen, rlen - float(r.get("trimEnd", 0.0)) + 1.8)
-		if bed_s1 - bed_s0 >= 1.0:
-			var bed_pts: PackedVector2Array = RoadGeom.slice_polyline(r["pts"], r["cum_len"], bed_s0, bed_s1)
+		var excl: Array = r.get("overpassSpans", []) if hide_flyovers else []
+		for iv in _slice_ground_intervals(bed_s0, bed_s1, excl):
+			var bed_pts: PackedVector2Array = RoadGeom.slice_polyline(r["pts"], r["cum_len"], float(iv[0]), float(iv[1]))
 			_road_batch.add_smooth_strip(bed_pts, rw, asph, false, false)
+		var pk_lvl: int = int(r.get("pocketLevel", 0))
+		if pk_lvl > 0 and r_unl and bed_s1 - bed_s0 >= 28.0:
+			var pk_len: float = minf((bed_s1 - bed_s0) * 0.42, 16.0 + 11.0 * float(pk_lvl))
+			for pk_iv in [[bed_s0, bed_s0 + pk_len], [bed_s1 - pk_len, bed_s1]]:
+				var pk_pts: PackedVector2Array = RoadGeom.slice_polyline(r["pts"], r["cum_len"], float(pk_iv[0]), float(pk_iv[1]))
+				_road_batch.add_smooth_strip(pk_pts, rw + RoadGeom.LANE_WIDTH, asph, false, false)
 
 	for j in sim.junctions:
 		var j_unl: bool = sim.unlocked_regions.has(int(j["regionIndex"]))
@@ -528,14 +786,12 @@ func _build_roads_and_junctions_batches(is_dark: bool) -> void:
 			isl_curb = isl_curb.lerp(COL_BG, 0.55)
 			isl_grass = isl_grass.lerp(COL_BG, 0.55)
 
-		# Crisp outer paved truck-apron + stone curb + landscaped green island
 		_road_batch.add_circle(jp, r_isl + 1.5, apron_c, 28)
 		_road_batch.add_circle(jp, r_isl + 0.4, isl_curb, 26)
 		_road_batch.add_circle(jp, maxf(2.4, r_isl - 0.8), isl_grass, 26)
 
 		if j_unl:
 			if j.get("landmark", null) != null and r_isl >= 5.6:
-				# Subtle Tugu / Bundaran monument plinth at landmark roundabouts (e.g. Bundaran Taman / Serayu)
 				_road_batch.add_rect_rot(jp + Vector2(0.8, 1.0), 4.8, 4.8, PI * 0.25, COL_SHADOW)
 				_road_batch.add_rect_rot(jp, 4.4, 4.4, PI * 0.25, Color("E8E3D6") if not is_dark else Color("6A7080"))
 				_road_batch.add_circle(jp, 1.4, Color("D97A3E"), 10)
@@ -543,7 +799,6 @@ func _build_roads_and_junctions_batches(is_dark: bool) -> void:
 				_road_batch.add_circle(jp + Vector2(-1.3, -0.9), 2.1, COL_TREE_B if not is_dark else COL_TREE_B.darkened(0.45), 10)
 				_road_batch.add_circle(jp + Vector2(1.5, 1.1), 1.7, COL_TREE_AUTUMN if not is_dark else COL_TREE_AUTUMN.darkened(0.45), 10)
 
-			# Triangular splitter islands on two-way roundabout arms
 			for a in geom["arms"]:
 				if int(a["one_way"]) == 0 and not bool(a["closed"]) and float(a["rlen"]) >= r_out + 24.0:
 					var u_out: Vector2 = a["throat_out_dir"]
@@ -554,7 +809,7 @@ func _build_roads_and_junctions_batches(is_dark: bool) -> void:
 					_road_batch.add_tri(p_tip, p_inner - rn * (sp_hw + 0.5), p_inner + rn * (sp_hw + 0.5), apron_c)
 					_road_batch.add_tri(p_tip - u_out * 1.1, p_inner - rn * sp_hw + u_out * 0.5, p_inner + rn * sp_hw + u_out * 0.5, isl_curb)
 
-	# Pass 5.4: Update 1.9 River-Crossing Bridges (strictly over river spans!) & Grade-Separated Overpasses
+	# Pass 5.4: Update 1.9 River-Crossing Bridges & Grade-Separated Overpasses (with Hide Flyovers ghost mode!)
 	for r in sim.roads:
 		if not bool(r["isBuilt"]):
 			continue
@@ -584,7 +839,6 @@ func _build_roads_and_junctions_batches(is_dark: bool) -> void:
 				if b_pts.size() < 2:
 					continue
 
-				# Bank abutment piers at s0 & s1 + intermediate river piers on wide Bengawan/Kali crossings
 				var pier_s_list: Array[float] = [s0, s1]
 				if span_len >= 52.0:
 					var n_mid: int = int(floor(span_len / 44.0))
@@ -596,7 +850,6 @@ func _build_roads_and_junctions_batches(is_dark: bool) -> void:
 					_road_batch.add_rect_rot(pr_raw["pos"], 4.8, rw + 8.6, p_ang, pier_dark)
 					_road_batch.add_rect_rot(pr_raw["pos"], 3.4, rw + 7.4, p_ang, pier_cap)
 
-				# Bridge concrete sidewalk deck + roadways + crisp left/right raised stone parapet rails
 				_road_batch.add_smooth_strip(b_pts, rw + 5.8, deck_walk, false, false)
 				_road_batch.add_smooth_strip(b_pts, rw, asph, false, false)
 				var rail_off: float = rw * 0.5 + 2.2
@@ -610,19 +863,25 @@ func _build_roads_and_junctions_batches(is_dark: bool) -> void:
 		if not o_spans.is_empty():
 			var ov_deck := Color("CFD4DC") if not is_dark else Color("49505E")
 			var ov_rail := Color("ECEFF4") if not is_dark else Color("6F788A")
+			var ghost_rail := Color(0.35, 0.58, 0.88, 0.36)
 			for osp in o_spans:
 				var os0: float = float(osp[0])
 				var os1: float = float(osp[1])
 				var o_pts: PackedVector2Array = RoadGeom.slice_polyline(pts, cum, os0, os1)
 				if o_pts.size() < 2:
 					continue
-				_road_batch.add_smooth_strip(o_pts, rw + 5.0, ov_deck, false, false)
-				_road_batch.add_smooth_strip(o_pts, rw, asph, false, false)
 				var or_off: float = rw * 0.5 + 2.0
-				_road_batch.add_smooth_strip(o_pts, 1.4, ov_rail, false, false, -or_off)
-				_road_batch.add_smooth_strip(o_pts, 1.4, ov_rail, false, false, or_off)
+				if hide_flyovers:
+					# Translucent ghost outline so ground junctions underneath are clearly visible & tappable!
+					_road_batch.add_dashed_polyline(o_pts, 1.3, ghost_rail, 6.0, 5.0, -or_off)
+					_road_batch.add_dashed_polyline(o_pts, 1.3, ghost_rail, 6.0, 5.0, or_off)
+				else:
+					_road_batch.add_smooth_strip(o_pts, rw + 5.0, ov_deck, false, false)
+					_road_batch.add_smooth_strip(o_pts, rw, asph, false, false)
+					_road_batch.add_smooth_strip(o_pts, 1.4, ov_rail, false, false, -or_off)
+					_road_batch.add_smooth_strip(o_pts, 1.4, ov_rail, false, false, or_off)
 
-	# Pass 5.5: Strictly Trimmed RoadPaint Markings, Closed-Street Plazas, Stop/Yield Bars & Turn Arrows
+	# Pass 5.5: Strictly Trimmed RoadPaint Markings, Closed-Street Plazas, Pocket Dividers & Turn Arrows
 	for r in sim.roads:
 		if not bool(r["isBuilt"]) or not sim.unlocked_regions.has(int(r["regionIndex"])):
 			continue
@@ -636,7 +895,6 @@ func _build_roads_and_junctions_batches(is_dark: bool) -> void:
 			continue
 
 		if bool(r["closed"]):
-			# Authentic pedestrianized park street (trimmed cleanly outside junctions!)
 			var c_pts: PackedVector2Array = RoadGeom.slice_polyline(pts, cum, p_s0 + 1.5, p_s1 - 1.5)
 			if c_pts.size() >= 2:
 				var lawn_c := COL_GRASS if not is_dark else COL_GRASS.darkened(0.55)
@@ -653,6 +911,10 @@ func _build_roads_and_junctions_batches(is_dark: bool) -> void:
 						_road_batch.add_circle(bp, 0.75, COL_LANE_MARK, 8)
 			continue
 
+		if hide_flyovers and not (r.get("overpassSpans", []) as Array).is_empty():
+			# Keep ground markings uncluttered when flyover is ghosted
+			continue
+
 		var ow: int = int(r["oneWay"])
 		var lf: int = maxi(1, int(r["lanesForward"]))
 		var lb: int = maxi(1, int(r["lanesBackward"]))
@@ -665,13 +927,24 @@ func _build_roads_and_junctions_batches(is_dark: bool) -> void:
 		var u_multi: bool = ((j_u.get("geom", {}) as Dictionary).get("arms", []) as Array).size() >= 3 or String(j_u.get("control", "")) == "lights"
 		var v_multi: bool = ((j_v.get("geom", {}) as Dictionary).get("arms", []) as Array).size() >= 3 or String(j_v.get("control", "")) == "lights"
 
+		# Pocket lane divider dashes when pocketLevel > 0
+		var pk_lvl_m: int = int(r.get("pocketLevel", 0))
+		if pk_lvl_m > 0 and p_s1 - p_s0 >= 28.0:
+			var pk_len_m: float = minf((p_s1 - p_s0) * 0.42, 16.0 + 11.0 * float(pk_lvl_m))
+			var pk_lat: float = rw * 0.5
+			var pk_u_pts: PackedVector2Array = RoadGeom.slice_polyline(pts, cum, p_s0, p_s0 + pk_len_m)
+			var pk_v_pts: PackedVector2Array = RoadGeom.slice_polyline(pts, cum, p_s1 - pk_len_m, p_s1)
+			if pk_u_pts.size() >= 2:
+				_road_batch.add_dashed_polyline(pk_u_pts, 0.85, mark_soft, 3.8, 3.8, pk_lat if lht else -pk_lat)
+			if pk_v_pts.size() >= 2:
+				_road_batch.add_dashed_polyline(pk_v_pts, 0.85, mark_soft, 3.8, 3.8, -pk_lat if lht else pk_lat)
+
 		if ow == 0:
 			var tot_l: int = lf + lb
 			var asym_shift: float = float(lf - lb) * 0.5 * RoadGeom.LANE_WIDTH
 			var div_off: float = asym_shift if not lht else -asym_shift
 
 			if String(r["roadClass"]) == "toll" or tot_l >= 4:
-				# Double solid arterial/highway median line + hatched gore chevron near signalized junctions!
 				_road_batch.add_smooth_strip(m_pts, 0.82, mark_col, false, false, div_off - 0.62)
 				_road_batch.add_smooth_strip(m_pts, 0.82, mark_col, false, false, div_off + 0.62)
 				if p_s1 - p_s0 >= 44.0:
@@ -680,7 +953,6 @@ func _build_roads_and_junctions_batches(is_dark: bool) -> void:
 					if String(j_v.get("control", "")) == "lights":
 						_add_hatched_median_gore(pts, cum, p_s1 - 15.5, p_s1 - 1.0, div_off, mark_soft)
 			else:
-				# Two-lane road: solid pre-junction throat centerline + crisp dashed mid-block centerline
 				var solid_u: float = 11.0 if (u_multi and p_s1 - p_s0 >= 30.0) else 0.0
 				var solid_v: float = 11.0 if (v_multi and p_s1 - p_s0 >= 30.0) else 0.0
 				if solid_u > 0.0:
@@ -693,7 +965,6 @@ func _build_roads_and_junctions_batches(is_dark: bool) -> void:
 				if mid_pts.size() >= 2:
 					_road_batch.add_dashed_polyline(mid_pts, 1.02, mark_soft, 6.2, 6.8, div_off)
 
-			# Same-direction multi-lane dashed dividers (turning solid right before traffic lights!)
 			if lf > 1:
 				var sol_end: float = 10.5 if (v_multi and p_s1 - p_s0 >= 28.0) else 0.0
 				var lf_dash_pts: PackedVector2Array = RoadGeom.slice_polyline(pts, cum, p_s0 + 1.0, p_s1 - sol_end - 1.0)
@@ -712,7 +983,6 @@ func _build_roads_and_junctions_batches(is_dark: bool) -> void:
 				var lb_dash_pts: PackedVector2Array = RoadGeom.slice_polyline(pts, cum, p_s0 + sol_start + 1.0, p_s1 - 1.0)
 				var lb_sol_pts: PackedVector2Array = RoadGeom.slice_polyline(pts, cum, p_s0, p_s0 + sol_start) if sol_start > 0.0 else PackedVector2Array()
 				for k in range(lb - 1):
-					# Note: backward direction has opposite right_vec, so negate lateral offset relative to forward pts!
 					var lat_a: float = -RoadGeom.get_lane_lateral_offset(0, float(k), lb, lf, lht)
 					var lat_b: float = -RoadGeom.get_lane_lateral_offset(0, float(k + 1), lb, lf, lht)
 					var b_lat: float = 0.5 * (lat_a + lat_b)
@@ -721,7 +991,6 @@ func _build_roads_and_junctions_batches(is_dark: bool) -> void:
 					if lb_sol_pts.size() >= 2:
 						_road_batch.add_smooth_strip(lb_sol_pts, 0.95, mark_col, false, false, b_lat)
 		else:
-			# One-way road lane dividers + crisp one-way chevrons
 			var lanes_ow: int = lf if ow > 0 else lb
 			var sign_ow: float = 1.0 if ow > 0 else -1.0
 			for k in range(lanes_ow - 1):
@@ -778,7 +1047,7 @@ func _add_hatched_median_gore(pts: PackedVector2Array, cum: PackedFloat32Array, 
 		s_cur += 2.8
 
 func _add_approach_control_and_arrows(
-	j: Dictionary,
+	_j: Dictionary,
 	a: Dictionary,
 	line_mode: String,
 	lht: bool,
@@ -790,14 +1059,14 @@ func _add_approach_control_and_arrows(
 		return
 	var r: Dictionary = sim.road_map[eid]
 	var is_start: bool = bool(a["is_start"])
-	var in_fwd: bool = not is_start # Entering J moves toward from-node if is_start, else toward to-node
+	var in_fwd: bool = not is_start
 	var ow: int = int(r["oneWay"])
 	var lanes_in: int = maxi(1, int(r["lanesForward"]) if in_fwd else int(r["lanesBackward"]))
 	var lanes_opp: int = maxi(1, int(r["lanesBackward"]) if in_fwd else int(r["lanesForward"]))
 
 	var p_th: Vector2 = a["throat_pos"]
 	var u_out: Vector2 = a["throat_out_dir"]
-	var in_dir: Vector2 = -u_out # Unit vector pointing INTO junction J
+	var in_dir: Vector2 = -u_out
 	var in_right := Vector2(-in_dir.y, in_dir.x)
 
 	var lat_outer: float = RoadGeom.get_lane_lateral_offset(ow, 0.0, lanes_in, lanes_opp, lht)
@@ -807,12 +1076,10 @@ func _add_approach_control_and_arrows(
 	var max_lat: float = maxf(lat_outer, lat_inner) + half_span
 
 	if line_mode == "stop_bar":
-		# Crisp solid white stop bar strictly across incoming lanes (exact match to game_stop.webp!)
 		var bar_a: Vector2 = p_th + in_right * min_lat
 		var bar_b: Vector2 = p_th + in_right * max_lat
 		_road_batch.add_smooth_strip(PackedVector2Array([bar_a, bar_b]), 1.85, mark_col, false, false)
 	elif line_mode == "yield_teeth" or line_mode == "roundabout_yield":
-		# Crisp white shark-teeth yield line across incoming lanes
 		var span_w: float = max_lat - min_lat
 		var n_teeth: int = maxi(2, int(round(span_w / 2.6)))
 		var step_w: float = span_w / float(n_teeth)
@@ -823,13 +1090,11 @@ func _add_approach_control_and_arrows(
 			var tw: float = step_w * 0.36
 			_road_batch.add_tri(tc + in_dir * 1.45, tc - in_dir * 0.85 - in_right * tw, tc - in_dir * 0.85 + in_right * tw, mark_col)
 		if line_mode == "yield_teeth":
-			# Neat roadside Yield sign on the outer curb (never blocking the roadway!)
 			var curb_lat: float = (min_lat - 2.6) if lht else (max_lat + 2.6)
 			var sign_c: Vector2 = p_th - in_dir * 2.0 + in_right * curb_lat
 			_road_batch.add_tri(sign_c + in_dir * 2.7, sign_c - in_dir * 1.9 - in_right * 2.5, sign_c - in_dir * 1.9 + in_right * 2.5, Color("C8323A"))
 			_road_batch.add_tri(sign_c + in_dir * 1.4, sign_c - in_dir * 1.1 - in_right * 1.3, sign_c - in_dir * 1.1 + in_right * 1.3, Color("FAF7EE"))
 
-	# Paint crisp lane turn arrows behind the stop/yield line on approaches with room
 	var rlen: float = float(a["rlen"])
 	var trim: float = float(a["trim"])
 	if rlen - trim < 23.0:
@@ -838,11 +1103,15 @@ func _add_approach_control_and_arrows(
 	var t_l: bool = bool(turns.get("left", false))
 	var t_s: bool = bool(turns.get("straight", true))
 	var t_r: bool = bool(turns.get("right", false))
+	var custom_mask: int = int(r.get("turnMaskForward" if in_fwd else "turnMaskBackward", 7))
 	if line_mode == "roundabout_yield":
-		# Entering roundabout deflects left in LHT, right in RHT
 		t_l = lht
 		t_s = true
 		t_r = not lht
+	elif custom_mask != 7:
+		t_l = (custom_mask & RoutePathfinder.TURN_LEFT) != 0
+		t_s = (custom_mask & RoutePathfinder.TURN_STRAIGHT) != 0
+		t_r = (custom_mask & RoutePathfinder.TURN_RIGHT) != 0
 
 	var s_arrow: float = (trim + 8.2) if is_start else (rlen - trim - 8.2)
 	var raw_ar: Dictionary = RoadGeom.sample_polyline_raw(r["pts"], r["cum_len"], s_arrow)
@@ -850,15 +1119,15 @@ func _add_approach_control_and_arrows(
 	var ar_right := Vector2(-ar_dir.y, ar_dir.x)
 	var ar_center_road: Vector2 = raw_ar["pos"]
 
+	var arrow_col: Color = Color("FFE066") if custom_mask != 7 else mark_soft
 	for li in range(lanes_in):
 		var lat_l: float = RoadGeom.get_lane_lateral_offset(ow, float(li), lanes_in, lanes_opp, lht)
 		var lane_c: Vector2 = ar_center_road + ar_right * lat_l
 		var l_flag := t_l
 		var s_flag := t_s
 		var r_flag := t_r
-		if lanes_in >= 2 and line_mode != "roundabout_yield":
+		if lanes_in >= 2 and line_mode != "roundabout_yield" and custom_mask == 7:
 			if lht:
-				# Lane 0 = leftmost curb lane, Lane lanes_in-1 = rightmost inner lane
 				if li == 0:
 					r_flag = false
 					if not l_flag:
@@ -886,7 +1155,7 @@ func _add_approach_control_and_arrows(
 					s_flag = true
 		if not l_flag and not s_flag and not r_flag:
 			s_flag = true
-		_add_lane_turn_arrow(lane_c, ar_dir, ar_right, l_flag, s_flag, r_flag, mark_soft)
+		_add_lane_turn_arrow(lane_c, ar_dir, ar_right, l_flag, s_flag, r_flag, arrow_col)
 
 func _add_lane_turn_arrow(
 	c: Vector2,
@@ -941,6 +1210,14 @@ class _StaticBatchLayer extends Node2D:
 			)
 
 
+class _MeshBatchLayer extends Node2D:
+	var mesh: ArrayMesh
+
+	func _draw() -> void:
+		if mesh != null and mesh.get_surface_count() > 0:
+			draw_mesh(mesh, null)
+
+
 class _DynamicWorldDrawer extends Node2D:
 	var owner_view: MapView25D
 
@@ -951,25 +1228,10 @@ class _DynamicWorldDrawer extends Node2D:
 		var frustum: Rect2 = owner_view.get_world_frustum()
 		var zoom_x: float = owner_view.camera.zoom.x
 		var font: Font = owner_view._ui_font if owner_view._ui_font != null else ThemeDB.fallback_font
+		var cb: bool = owner_view.colorblind_mode
+		var is_dark: bool = owner_view.dark_theme or sim.night_mode
 
-		# 1. Active Rule-Hint Rings (rule_hints.gdshader style) & Selected Junction Lane-Connector Bands
-		var tool_s := owner_view.active_tool
-		if tool_s == "yield" or tool_s == "roundabout" or tool_s == "lights":
-			var rot_phase: float = float(Time.get_ticks_msec()) * 0.0012
-			for j_hint in sim.junctions:
-				if not sim.unlocked_regions.has(int(j_hint["regionIndex"])):
-					continue
-				var jhp: Vector2 = j_hint["pos"]
-				if not frustum.has_point(jhp):
-					continue
-				var arms_h: Array = (j_hint.get("geom", {}) as Dictionary).get("arms", [])
-				if arms_h.size() < 3:
-					continue
-				var hr: float = maxf(18.0, float((j_hint.get("geom", {}) as Dictionary).get("r_outer", 12.0)) + 5.5)
-				for di in range(10):
-					var a0: float = rot_phase + TAU * (float(di) / 10.0)
-					draw_arc(jhp, hr, a0, a0 + TAU * 0.052, 5, Color(0.33, 0.56, 0.88, 0.62), 1.8, true)
-
+		# 1. Selected Road / Junction / Facility Highlights
 		if owner_view.selected_road_id != "" and sim.road_map.has(owner_view.selected_road_id):
 			var sr: Dictionary = sim.road_map[owner_view.selected_road_id]
 			var sr_w: float = float(sr.get("widthPx", 14.0)) + 5.5
@@ -982,30 +1244,32 @@ class _DynamicWorldDrawer extends Node2D:
 		if owner_view.selected_facility_id != "" and sim.facility_map.has(owner_view.selected_facility_id):
 			var sf: Dictionary = sim.facility_map[owner_view.selected_facility_id]
 			draw_arc(sf["pos"], 24.0, 0.0, TAU, 32, Color("F4C64A"), 3.4, true)
-			# Highlight routes belonging to the selected facility (just like game_trucks.webp!)
 			_draw_facility_routes_highlight(sim, owner_view.selected_facility_id, frustum)
 
 		if owner_view.route_draft_from_id != "" and sim.facility_map.has(owner_view.route_draft_from_id):
 			var df: Dictionary = sim.facility_map[owner_view.route_draft_from_id]
 			var pulse: float = 22.0 + 4.0 * sin(Time.get_ticks_msec() * 0.008)
-			draw_arc(df["pos"], pulse, 0.0, TAU, 28, Color("4FB35E"), 3.4, true)
+			draw_arc(df["pos"], pulse, 0.0, TAU, 28, GameCatalog.status_color("good", cb), 3.4, true)
 
-		# 2. Five Analytic Map Overlays (from OverlayBar)
+		# 2. Five Analytic Map Overlays + Authentic Update 1.10 Soft Map Wash!
 		var mode := owner_view.overlay_mode
-		if mode == "routes":
-			_draw_routes_overlay(sim, frustum)
-		elif mode == "traffic":
-			_draw_traffic_heatmap(sim, frustum)
-		elif mode == "flow":
-			_draw_goods_flow_sankey(sim, font, frustum)
-		elif mode == "buildings":
-			_draw_buildings_overlay(sim, frustum)
-		elif mode == "demand":
-			_draw_demand_overlay(sim, font, zoom_x)
+		if mode != "none":
+			var wash_col := Color(0.09, 0.11, 0.15, 0.58) if is_dark else Color(0.95, 0.94, 0.90, 0.56)
+			draw_rect(frustum, wash_col, true)
+			if mode == "routes":
+				_draw_routes_overlay(sim, frustum)
+			elif mode == "traffic":
+				_draw_traffic_heatmap(sim, frustum, cb)
+			elif mode == "flow":
+				_draw_goods_flow_sankey(sim, font, frustum)
+			elif mode == "buildings":
+				_draw_buildings_overlay(sim, frustum, cb)
+			elif mode == "demand":
+				_draw_demand_overlay(sim, font, zoom_x, cb)
 		elif owner_view.selected_route_id != "":
 			_draw_single_route(sim, owner_view.selected_route_id, frustum)
 
-		# 3. Authentic Corner-Mounted Circular Traffic Light Signal Heads (matching game_stop.webp & game_lights.webp!)
+		# 3. Authentic Multi-Phase Corner Traffic Light Signal Heads (with green-continuation & turn aspect!)
 		for j in sim.junctions:
 			if String(j["control"]) != "lights" or not j.has("light"):
 				continue
@@ -1014,19 +1278,21 @@ class _DynamicWorldDrawer extends Node2D:
 			var jp: Vector2 = j["pos"]
 			if not frustum.has_point(jp):
 				continue
-			var lt: Dictionary = j["light"]
-			var stg := String(lt["stage"])
-			var ph: int = int(lt["currentPhase"])
 			var geom_j: Dictionary = j.get("geom", {})
 			var arms_j: Array = geom_j.get("arms", [])
 			for a in arms_j:
 				if not bool(a["can_enter"]):
 					continue
 				var eid_a := String(a["edge_id"])
-				var arm_phase: int = sim.get_edge_phase_at_junction(j, eid_a)
-				var lens_col := Color("D4383B")
-				if arm_phase == ph:
-					lens_col = Color("4FB35E") if stg == "green" else (Color("F2AB37") if stg == "yellow" else Color("D4383B"))
+				var sig_state: String = sim.get_arm_signal_state(j, eid_a)
+				var lens_col: Color
+				if sig_state == "green":
+					lens_col = Color("3B9EFF") if cb else Color("4FB35E")
+				elif sig_state == "yellow":
+					lens_col = Color("F2AB37")
+				else:
+					lens_col = Color("AE3EC9") if cb else Color("D4383B")
+
 				var p_th: Vector2 = a["throat_pos"]
 				var in_dir: Vector2 = -(a["throat_out_dir"] as Vector2)
 				var in_right := Vector2(-in_dir.y, in_dir.x)
@@ -1037,7 +1303,7 @@ class _DynamicWorldDrawer extends Node2D:
 				draw_circle(sig_pos, 3.6, Color("23242B"))
 				draw_circle(sig_pos, 2.45, lens_col)
 
-		# 4. Station Cargo Trains & Harbour Ships (Pelabuhan Tamperan)
+		# 4. Station Cargo Trains, Harbour Ships & Update 1.10 On-Site Storage Yard Piles!
 		for f in sim.facilities:
 			if not sim.unlocked_regions.has(int(f["regionIndex"])):
 				continue
@@ -1057,7 +1323,17 @@ class _DynamicWorldDrawer extends Node2D:
 				draw_colored_polygon(hull, Color("2F5D8A"))
 				draw_rect(Rect2(fp + Vector2(-12, 11), Vector2(18, 5)), Color("E8792F"), true)
 
-		# 5. Physical Cargo Stockpile Dots on Loading Aprons + Articulated Trucks (TruckView)
+			if fk == "station" or fk == "harbour":
+				var pile: Array = f.get("yardPile", [])
+				var show_n: int = mini(10, pile.size())
+				for pi in range(show_n):
+					var pg := String(pile[pi])
+					var col_i: int = pi % 5
+					var row_i: int = pi / 5
+					var ppos := fp + Vector2(-9.0 + float(col_i) * 4.5, 7.6 + float(row_i) * 4.2)
+					ItIcons.draw_shape(self, pg, ppos, 4.0)
+
+		# 5. Authentic Articulated Trucks (TruckView: multi-slot trailers, Express bonus bar, brake lights & blinkers!)
 		for ag in sim.agents:
 			var st := String(ag["state"])
 			if st != "driving_outbound" and st != "driving_return":
@@ -1074,9 +1350,9 @@ class _DynamicWorldDrawer extends Node2D:
 				continue
 			if not sim.unlocked_regions.has(int(f["regionIndex"])):
 				continue
-			_draw_facility_badge(f, sim, font, zoom_x)
+			_draw_facility_badge(f, sim, font, zoom_x, cb)
 
-		# 7. Authentic RegionGate World Pins on Active Locked Region (matching game_trucks.webp!)
+		# 7. Authentic RegionGate World Pins on Active Locked Region
 		var inv_z: float = clampf(1.0 / maxf(0.35, zoom_x), 0.65, 1.75)
 		var active_goal_reg: Dictionary = sim.get_active_goal_region()
 		var active_goal_idx: int = int(active_goal_reg.get("index", -1)) if not active_goal_reg.is_empty() else -1
@@ -1086,9 +1362,9 @@ class _DynamicWorldDrawer extends Node2D:
 				continue
 			if not bool(reg["unlocked"]):
 				var is_next: bool = int(reg["index"]) == active_goal_idx
-				_draw_region_gate_pin(reg, font, inv_z, is_next)
+				_draw_region_gate_pin(reg, font, inv_z, is_next, cb)
 			elif zoom_x < 0.78:
-				var rcol := Color(0.18, 0.20, 0.24, 0.45) if not (owner_view.dark_theme or sim.night_mode) else Color(0.85, 0.88, 0.92, 0.40)
+				var rcol := Color(0.18, 0.20, 0.24, 0.45) if not is_dark else Color(0.85, 0.88, 0.92, 0.40)
 				draw_string(font, rc + Vector2(-70.0 * inv_z, 0.0), String(reg["name"]).to_upper(), HORIZONTAL_ALIGNMENT_CENTER, 140.0 * inv_z, int(12.0 * inv_z), rcol)
 
 		# 8. Authentic RewardPopups (Dark Pill + Gold Coin + Bold +$50 / EXPRESS ×2!)
@@ -1104,9 +1380,7 @@ class _DynamicWorldDrawer extends Node2D:
 		var arms: Array = geom.get("arms", [])
 		var r_ring: float = maxf(22.0, float(geom.get("r_outer", 14.0)) + 8.5)
 		var ctrl := String(sj["control"])
-		var active_ph: int = int((sj.get("light", {}) as Dictionary).get("currentPhase", 0)) if ctrl == "lights" else -1
 
-		# Translucent colored lane-connector bands across the junction (matching steam_u17_lane_bands.png & game_lights.webp!)
 		for i in range(arms.size()):
 			var a_in: Dictionary = arms[i]
 			if not bool(a_in["can_enter"]):
@@ -1118,7 +1392,7 @@ class _DynamicWorldDrawer extends Node2D:
 			var in_fwd: bool = not bool(a_in["is_start"])
 			var in_lanes: int = maxi(1, int(r_in["lanesForward"]) if in_fwd else int(r_in["lanesBackward"]))
 			var v_in: Vector2 = -(a_in["out_dir"] as Vector2)
-			var is_green_arm: bool = (ctrl == "lights" and sim.get_edge_phase_at_junction(sj, eid_in) == active_ph)
+			var road_mask: int = int(r_in.get("turnMaskForward" if in_fwd else "turnMaskBackward", 7))
 
 			for k in range(arms.size()):
 				if k == i:
@@ -1131,18 +1405,23 @@ class _DynamicWorldDrawer extends Node2D:
 					continue
 				var r_out: Dictionary = sim.road_map[eid_out]
 				var out_fwd: bool = bool(a_out["is_start"])
+				var t_bit: int = RoutePathfinder.classify_turn_bit(sim.junction_map, sim.road_map, eid_in, in_fwd, String(sj["id"]), eid_out, out_fwd)
+				if (road_mask & t_bit) == 0:
+					continue
+
 				var out_lanes: int = maxi(1, int(r_out["lanesForward"]) if out_fwd else int(r_out["lanesBackward"]))
 				var v_out: Vector2 = a_out["out_dir"]
 				var tang: float = atan2(v_in.x * v_out.y - v_in.y * v_out.x, v_in.dot(v_out))
+				var is_green_move: bool = (ctrl == "lights" and sim.is_movement_green_at_light(sj, eid_in, in_fwd, eid_out, out_fwd))
 
 				var band_col: Color
-				var alpha_b: float = 0.46 if is_green_arm else (0.18 if ctrl == "lights" else 0.30)
+				var alpha_b: float = 0.52 if is_green_move else (0.14 if ctrl == "lights" else 0.32)
 				if absf(tang) <= deg_to_rad(38.0):
-					band_col = Color(0.28, 0.70, 0.45, alpha_b) # Straight: emerald green
+					band_col = Color(0.28, 0.70, 0.45, alpha_b)
 				elif tang > 0.0:
-					band_col = Color(0.90, 0.50, 0.22, alpha_b) # Right: warm orange
+					band_col = Color(0.90, 0.50, 0.22, alpha_b)
 				else:
-					band_col = Color(0.45, 0.48, 0.86, alpha_b) # Left: periwinkle blue
+					band_col = Color(0.45, 0.48, 0.86, alpha_b)
 
 				var chosen_in_l: int = 0
 				if in_lanes >= 2:
@@ -1157,9 +1436,8 @@ class _DynamicWorldDrawer extends Node2D:
 					r_out, out_fwd, float(chosen_out_l), out_lanes, sim.left_hand_traffic
 				)
 				if c_pts.size() >= 2:
-					draw_polyline(c_pts, band_col, 2.8 if is_green_arm else 2.2, true)
+					draw_polyline(c_pts, band_col, 2.9 if is_green_move else 2.1, true)
 
-		# Crisp thin blue inspection ring (exact match to steam_u17_lane_bands.png & game_lights.webp!)
 		draw_arc(jp, r_ring, 0.0, TAU, 40, Color(0.35, 0.56, 0.86, 0.88), 1.8, true)
 
 	func _draw_facility_routes_highlight(sim: SimEngine, fac_id: String, frustum: Rect2) -> void:
@@ -1190,6 +1468,15 @@ class _DynamicWorldDrawer extends Node2D:
 				if frustum.intersects(r["aabb"]):
 					draw_polyline(r["pts"], Color("23242B"), 5.6, true)
 					draw_polyline(r["pts"], col, 3.6, true)
+		if not bool(rt.get("sameWayBack", true)):
+			var ret_col := col.lightened(0.25)
+			ret_col.a = 0.62
+			for st_r in rt["returnPath"]:
+				var eid_r := String(st_r["edgeId"])
+				if sim.road_map.has(eid_r):
+					var r_r: Dictionary = sim.road_map[eid_r]
+					if frustum.intersects(r_r["aabb"]):
+						draw_polyline(r_r["pts"], ret_col, 2.2, true)
 		for wp in rt["waypoints"]:
 			if sim.junction_map.has(String(wp)):
 				var wpos: Vector2 = sim.junction_map[String(wp)]["pos"]
@@ -1205,8 +1492,8 @@ class _DynamicWorldDrawer extends Node2D:
 				continue
 			var is_sel: bool = rtid == owner_view.selected_route_id
 			var col: Color = rt["color"]
-			col.a = 0.92 if is_sel else 0.72
-			var w: float = 3.8 if is_sel else 2.4
+			col.a = 0.94 if is_sel else 0.78
+			var w: float = 4.0 if is_sel else 2.6
 			var lat_shift: float = float((idx % 3) - 1) * 2.2
 			idx += 1
 			for st in rt["forwardPath"]:
@@ -1229,18 +1516,15 @@ class _DynamicWorldDrawer extends Node2D:
 					draw_circle(wpos, 5.5, col)
 					draw_circle(wpos, 2.5, Color.WHITE)
 
-	func _draw_traffic_heatmap(sim: SimEngine, frustum: Rect2) -> void:
+	func _draw_traffic_heatmap(sim: SimEngine, frustum: Rect2, colorblind: bool) -> void:
 		for r in sim.roads:
 			if not bool(r["isBuilt"]) or not sim.unlocked_regions.has(int(r["regionIndex"])):
 				continue
 			if not frustum.intersects(r["aabb"]):
 				continue
-			var cong: float = clampf(float(r["congestionEMA"]), 0.0, 1.2)
-			var hcol: Color = Color("4FB35E").lerp(Color("F2C230"), clampf(cong / 0.6, 0.0, 1.0))
-			if cong > 0.6:
-				hcol = Color("F2C230").lerp(Color("C8323A"), clampf((cong - 0.6) / 0.6, 0.0, 1.0))
-			hcol.a = 0.80
-			draw_polyline(r["pts"], hcol, 6.8, true)
+			var cong: float = clampf(float(r["congestionEMA"]) / 1.15, 0.0, 1.0)
+			var hcol: Color = GameCatalog.traffic_band_color(cong, colorblind, 0.88)
+			draw_polyline(r["pts"], hcol, 7.2, true)
 
 	func _draw_goods_flow_sankey(sim: SimEngine, font: Font, frustum: Rect2) -> void:
 		var r_idx: int = 0
@@ -1252,9 +1536,9 @@ class _DynamicWorldDrawer extends Node2D:
 			if gid == "any" or gid == "":
 				var out_g = f_from.get("outputGood", null)
 				gid = String(out_g) if out_g != null else ""
-			if gid == "":
+			if gid == "" or not GameCatalog.GOODS.has(gid):
 				var reqs: Array = f_from.get("inputs", [])
-				gid = String(reqs[0]["good"]) if not reqs.is_empty() else "grain"
+				gid = String(reqs[0]["good"]) if not reqs.is_empty() else "dot"
 			var gcol: Color = ItIcons.color_of(gid)
 			var fkey := "%s->%s->%s" % [String(rt["fromFacilityId"]), String(rt["toFacilityId"]), gid]
 			var measured: float = 0.0
@@ -1291,7 +1575,6 @@ class _DynamicWorldDrawer extends Node2D:
 				draw_polyline(spts, Color("23242B"), width + 2.6, true)
 				draw_polyline(spts, gcol, width, true)
 
-				# Directional chevron arrow along segment
 				var p0: Vector2 = spts[0]
 				var p1: Vector2 = spts[spts.size() - 1]
 				if not bool(st.get("forward", true)):
@@ -1326,7 +1609,7 @@ class _DynamicWorldDrawer extends Node2D:
 				draw_string(font, pr.position + Vector2(4.0, 12.2), r_txt, HORIZONTAL_ALIGNMENT_LEFT, 40.0, 9, Color("23242B"))
 				ItIcons.draw_shape(self, gid, pr.position + Vector2(pw - 8.5, 8.5), 9.0)
 
-	func _draw_buildings_overlay(sim: SimEngine, frustum: Rect2) -> void:
+	func _draw_buildings_overlay(sim: SimEngine, frustum: Rect2, colorblind: bool) -> void:
 		for f in sim.facilities:
 			if not sim.unlocked_regions.has(int(f["regionIndex"])):
 				continue
@@ -1334,14 +1617,14 @@ class _DynamicWorldDrawer extends Node2D:
 			if not frustum.has_point(fp):
 				continue
 			var sr := String(f["stalledReason"])
-			var scol := Color("3E9E50")
+			var scol: Color = GameCatalog.status_color("good", colorblind)
 			if sr == "missing_input":
-				scol = Color("E09A2A")
+				scol = GameCatalog.status_color("warn", colorblind)
 			elif sr == "output_full":
-				scol = Color("D0393F")
-			draw_arc(fp, 23.0, 0.0, TAU, 28, scol, 4.0, true)
+				scol = GameCatalog.status_color("bad", colorblind)
+			draw_arc(fp, 23.0, 0.0, TAU, 28, scol, 4.4, true)
 
-	func _draw_demand_overlay(sim: SimEngine, font: Font, zoom_x: float) -> void:
+	func _draw_demand_overlay(sim: SimEngine, font: Font, zoom_x: float, colorblind: bool) -> void:
 		var goal_reg: Dictionary = sim.get_active_goal_region()
 		if goal_reg.is_empty():
 			return
@@ -1353,17 +1636,19 @@ class _DynamicWorldDrawer extends Node2D:
 			var cur_v: float = float(g.get("currentPerMin", 0.0))
 			var tgt_v: float = float(g["targetPerMin"])
 			var ratio: float = clampf(cur_v / maxf(0.1, tgt_v), 0.0, 1.0)
-			var bar_col := Color("3E9E50") if ratio >= 0.99 else (Color("E09A2A") if ratio >= 0.5 else Color("D0393F"))
+			var lvl := "good" if ratio >= 0.99 else ("warn" if ratio >= 0.5 else "bad")
+			var bar_col: Color = GameCatalog.status_color(lvl, colorblind)
 			var box := Rect2(rc + Vector2(-72 * inv_z, y_off - 12 * inv_z), Vector2(144 * inv_z, 20 * inv_z))
 			draw_rect(box, Color("FAF7EE"), true)
 			draw_rect(box, Color("23242B"), false, 1.6)
 			ItIcons.draw_shape(self, gid, box.position + Vector2(12 * inv_z, box.size.y * 0.5), 13.0 * inv_z)
 			var txt := "%.1f / %.1f / min" % [cur_v, tgt_v]
-			draw_string(font, box.position + Vector2(24 * inv_z, 14 * inv_z), txt, HORIZONTAL_ALIGNMENT_LEFT, 114 * inv_z, int(11 * inv_z), bar_col.darkened(0.15))
+			draw_string(font, box.position + Vector2(24 * inv_z, 14 * inv_z), txt, HORIZONTAL_ALIGNMENT_LEFT, 114 * inv_z, int(11 * inv_z), bar_col.darkened(0.12))
 			y_off += 23.0 * inv_z
 
 	func _draw_articulated_truck(ag: Dictionary, sim: SimEngine, night_blend: float) -> void:
-		var tdef: Dictionary = GameCatalog.TRUCKS[String(ag["model"])]
+		var m_id := String(ag["model"])
+		var tdef: Dictionary = GameCatalog.TRUCKS[m_id]
 		var cab_pos: Vector2 = ag["pos"]
 		var cab_ang: float = float(ag["heading"])
 		var rtid := String(ag["routeId"])
@@ -1371,10 +1656,11 @@ class _DynamicWorldDrawer extends Node2D:
 		var rt: Dictionary = sim.get_route(rtid)
 		var cab_col: Color = Color("8A8F98") if greyed else (rt.get("color", tdef["color"]) as Color)
 
+		var fwd := Vector2(cos(cab_ang), sin(cab_ang))
+		var side := Vector2(-fwd.y, fwd.x)
+
 		# Night headlight cone
 		if night_blend > 0.12 and not greyed:
-			var fwd := Vector2(cos(cab_ang), sin(cab_ang))
-			var side := Vector2(-fwd.y, fwd.x)
 			var cone := PackedVector2Array([
 				cab_pos + fwd * 4.0,
 				cab_pos + fwd * 29.0 + side * 10.5,
@@ -1382,42 +1668,93 @@ class _DynamicWorldDrawer extends Node2D:
 			])
 			draw_colored_polygon(cone, Color(1.0, 0.95, 0.72, 0.25 * night_blend))
 
-		# Draw trailers back-to-front (TruckView: #1D2128 keyline + #F6F5EF paper box + ShapeGlyphs cargo!)
 		var t_poses: Array = ag["trailerPoses"]
+		var tr_slots_arr: Array = tdef["trailers"]
 		var c_good := String(ag["cargoGood"])
-		var has_cargo: bool = c_good != "" and int(ag["cargoQty"]) > 0
+		var c_qty: int = int(ag["cargoQty"])
+		var has_cargo: bool = c_good != "" and c_qty > 0 and GameCatalog.GOODS.has(c_good)
+		var g_slots: int = int(GameCatalog.GOODS[c_good]["slots"]) if has_cargo else 1
+		var any_sz: bool = bool(tdef["any_size_per_trailer"])
 		var paper_col := Color("D5D7DC") if greyed else Color("F6F5EF")
 		var ink_col := Color("1D2128")
+		var exp_bonus_left: float = sim.get_agent_express_bonus_left(ag)
+		var is_braking: bool = bool(ag.get("braking", false))
+		var turn_sig: int = int(ag.get("turnSignal", 0))
+		var blink_on: bool = turn_sig != 0 and fmod(float(Time.get_ticks_msec()) * 0.0036, 1.0) < 0.55
+
+		# Precompute per-trailer unit counts so multi-slot cargo distributes authentically front-to-back
+		var units_per_tr: Array[int] = []
+		var rem_units: int = c_qty
+		for ti_f in range(t_poses.size()):
+			var sl_cap: int = int(tr_slots_arr[mini(ti_f, tr_slots_arr.size() - 1)])
+			var fit_max: int = 1 if any_sz else maxi(1, sl_cap / maxi(1, g_slots))
+			var put: int = mini(rem_units, fit_max) if has_cargo else 0
+			units_per_tr.append(put)
+			rem_units = maxi(0, rem_units - put)
 
 		for ti in range(t_poses.size() - 1, -1, -1):
 			var tp: Vector2 = t_poses[ti]["pos"]
 			var tang: float = float(t_poses[ti]["heading"])
+			var sl_cap_i: int = int(tr_slots_arr[mini(ti, tr_slots_arr.size() - 1)])
+			var box_l: float = 6.6 if sl_cap_i <= 1 else (8.4 if sl_cap_i == 2 else 10.0)
 			var lead_p: Vector2 = cab_pos if ti == 0 else t_poses[ti - 1]["pos"]
 			draw_line(tp, lead_p, ink_col, 1.6)
-			_draw_rot_box(tp, 8.4, 5.0, tang, ink_col)
-			_draw_rot_box(tp, 7.2, 3.8, tang, paper_col)
-			if has_cargo and not greyed:
-				ItIcons.draw_shape(self, c_good, tp, 3.8, tang + ItIcons.truck_angle(c_good))
+			_draw_rot_box(tp, box_l + 1.2, 5.0, tang, ink_col)
+			_draw_rot_box(tp, box_l, 3.8, tang, paper_col)
 
-		# Tractor cab with dark ink outline & glass windshield
+			var tr_fwd := Vector2(cos(tang), sin(tang))
+			var tr_side := Vector2(-tr_fwd.y, tr_fwd.x)
+
+			var u_here: int = units_per_tr[ti]
+			if u_here > 0 and not greyed:
+				for ui in range(u_here):
+					var off_along: float = 0.0 if u_here == 1 else lerpf(-box_l * 0.26, box_l * 0.26, float(ui) / float(u_here - 1))
+					var glyph_sz: float = 3.9 if u_here == 1 else (3.3 if u_here == 2 else 2.8)
+					ItIcons.draw_shape(self, c_good, tp + tr_fwd * off_along, glyph_sz, tang + ItIcons.truck_angle(c_good))
+
+			# Authentic Express shrinking white bonus bar along trailer edge!
+			if ti == 0 and exp_bonus_left >= 0.0 and not greyed:
+				var bar_center: Vector2 = tp - tr_side * 2.15
+				_draw_rot_box(bar_center, box_l * 0.92, 1.15, tang, ink_col)
+				if exp_bonus_left > 0.02:
+					var fill_l: float = box_l * 0.88 * exp_bonus_left
+					var fill_c: Vector2 = bar_center - tr_fwd * ((box_l * 0.88 - fill_l) * 0.5)
+					var exp_col := Color("FFD43B") if float(ag.get("expressBonusLocked", -1.0)) >= 0.0 else Color.WHITE
+					_draw_rot_box(fill_c, fill_l, 0.78, tang, exp_col)
+
+			# Rear brake tail-lights & rear turn blinker on tail trailer
+			if ti == t_poses.size() - 1 and not greyed:
+				var rear_base: Vector2 = tp - tr_fwd * (box_l * 0.5 + 0.35)
+				if is_braking:
+					draw_circle(rear_base - tr_side * 1.55, 0.95, Color("FF3B30"))
+					draw_circle(rear_base + tr_side * 1.55, 0.95, Color("FF3B30"))
+				if blink_on:
+					var b_side: float = -1.65 if turn_sig < 0 else 1.65
+					draw_circle(rear_base + tr_side * b_side, 1.05, Color("FFB020"))
+
+		# Tractor cab with dark ink outline, glass windshield & Express racing stripe
 		var cab_l: float = float(tdef["cab_len"]) * 0.74
 		_draw_rot_box(cab_pos, cab_l + 1.2, 5.2, cab_ang, ink_col)
 		_draw_rot_box(cab_pos, cab_l, 4.0, cab_ang, cab_col)
-		var windshield: Vector2 = cab_pos + Vector2(cos(cab_ang), sin(cab_ang)) * 1.5
+		if m_id == "express" and not greyed:
+			_draw_rot_box(cab_pos - fwd * 0.6, cab_l * 0.55, 1.1, cab_ang, Color(1, 1, 1, 0.85))
+		var windshield: Vector2 = cab_pos + fwd * 1.5
 		_draw_rot_box(windshield, 1.9, 3.1, cab_ang, Color("2B3442"))
+		if blink_on and not greyed:
+			var f_side: float = -1.85 if turn_sig < 0 else 1.85
+			draw_circle(cab_pos + fwd * (cab_l * 0.48) + side * f_side, 1.05, Color("FFB020"))
 
 	func _draw_rot_box(c: Vector2, length: float, width: float, ang: float, col: Color) -> void:
 		var ux := Vector2(cos(ang), sin(ang)) * (length * 0.5)
 		var uy := Vector2(-sin(ang), cos(ang)) * (width * 0.5)
 		draw_colored_polygon(PackedVector2Array([c - ux - uy, c + ux - uy, c + ux + uy, c - ux + uy]), col)
 
-	func _draw_facility_badge(f: Dictionary, sim: SimEngine, font: Font, zoom_x: float) -> void:
+	func _draw_facility_badge(f: Dictionary, sim: SimEngine, font: Font, zoom_x: float, colorblind: bool) -> void:
 		var fp: Vector2 = f["pos"]
 		var badge_pos: Vector2 = fp + Vector2(0, -4.5)
 		var kind_s := String(f["kind"])
 		var stalled := String(f["stalledReason"])
 
-		# Crisp white paper circular medallion with #23242B ink rim & live progress arc
 		draw_circle(badge_pos + Vector2(0, 1.5), 9.6, Color(0, 0, 0, 0.22))
 		draw_circle(badge_pos, 9.6, Color("23242B"))
 		draw_circle(badge_pos, 8.0, Color("FAF7EE"))
@@ -1428,7 +1765,6 @@ class _DynamicWorldDrawer extends Node2D:
 			if prog > 0.02:
 				draw_arc(badge_pos, 8.8, -PI * 0.5, -PI * 0.5 + TAU * prog, 20, ItIcons.color_of(gid), 2.0, true)
 			ItIcons.draw_shape(self, gid, badge_pos, 11.5)
-			# Physical cargo dots on apron for buffered output
 			var buf_n: int = mini(6, int(f.get("outputBuffer", 0)))
 			for bi in range(buf_n):
 				var sp_pos := fp + Vector2(-10.0 + float(bi) * 4.0, 9.5)
@@ -1440,13 +1776,11 @@ class _DynamicWorldDrawer extends Node2D:
 		else:
 			ItIcons.draw_overlay_icon(self, "demand", badge_pos, Color("23242B"))
 
-		# Status dot if waiting/full (like game_town-wide.webp)
 		if stalled != "none":
-			var warn_col := Color("C2412F") if stalled == "output_full" else Color("E09A2A")
+			var warn_col: Color = GameCatalog.status_color("bad" if stalled == "output_full" else "warn", colorblind)
 			draw_circle(badge_pos + Vector2(7.5, -7.5), 4.2, Color("23242B"))
 			draw_circle(badge_pos + Vector2(7.5, -7.5), 3.0, warn_col)
 
-		# Upright FactoryLabel sticker pill when zoomed in
 		if zoom_x >= 0.65:
 			var short_nm: String = String(f["name"])
 			if short_nm.length() > 20:
@@ -1458,13 +1792,12 @@ class _DynamicWorldDrawer extends Node2D:
 			draw_rect(pill_r, Color("23242B"), false, 1.3)
 			draw_string(font, Vector2(pill_r.position.x + 3.0, pill_r.position.y + 10.8), short_nm, HORIZONTAL_ALIGNMENT_CENTER, pill_w - 6.0, 9, Color("F2F0E5") if is_dark else Color("23242B"))
 
-	func _draw_region_gate_pin(reg: Dictionary, font: Font, inv_z: float, is_next: bool) -> void:
+	func _draw_region_gate_pin(reg: Dictionary, font: Font, inv_z: float, is_next: bool, colorblind: bool) -> void:
 		var rc: Vector2 = reg["center_vec"]
 		var goals: Array = reg["goals"]
 		var ring_r: float = 17.0 * inv_z
 
 		if not is_next:
-			# Compact locked pin for future regions
 			draw_circle(rc, ring_r, Color("FAF7EE"))
 			draw_arc(rc, ring_r, 0.0, TAU, 24, Color("23242B"), 2.2 * inv_z, true)
 			draw_rect(Rect2(rc - Vector2(4.5 * inv_z, 1.0 * inv_z), Vector2(9.0 * inv_z, 7.0 * inv_z)), Color("23242B"), true)
@@ -1475,17 +1808,14 @@ class _DynamicWorldDrawer extends Node2D:
 			draw_string(font, nm_box.position + Vector2(6.0 * inv_z, 15.0 * inv_z), String(reg["name"]), HORIZONTAL_ALIGNMENT_LEFT, 96.0 * inv_z, int(10.5 * inv_z), Color("23242B"))
 			return
 
-		# Full authentic RegionGate card (matching REGION 5 in game_trucks.webp!)
 		var sum_pct: float = 0.0
 		for g in goals:
 			var ratio: float = clampf(float(g.get("currentPerMin", 0.0)) / maxf(0.1, float(g["targetPerMin"])), 0.0, 1.0)
 			sum_pct += ratio
 		var avg_pct: float = (sum_pct / float(maxi(1, goals.size())))
 
-		# Stem line down to ground
 		draw_line(rc + Vector2(0, ring_r), rc + Vector2(0, ring_r + 18.0 * inv_z), Color("625F57"), 2.0 * inv_z)
 
-		# Left circular multi-arc ring + lock glyph
 		var ring_c: Vector2 = rc - Vector2(54.0 * inv_z, 0.0)
 		draw_circle(ring_c, ring_r + 2.0 * inv_z, Color("FAF7EE"))
 		draw_arc(ring_c, ring_r + 2.0 * inv_z, 0.0, TAU, 28, Color("23242B"), 2.0 * inv_z, true)
@@ -1501,7 +1831,6 @@ class _DynamicWorldDrawer extends Node2D:
 		draw_rect(Rect2(ring_c - Vector2(4.2 * inv_z, 0.5 * inv_z), Vector2(8.4 * inv_z, 6.8 * inv_z)), Color("23242B"), true)
 		draw_arc(ring_c - Vector2(0, 1.2 * inv_z), 3.0 * inv_z, PI, TAU, 12, Color("23242B"), 1.7 * inv_z, true)
 
-		# Right white card with goal bars
 		var card_h: float = (26.0 + float(goals.size()) * 14.0) * inv_z
 		var card_w: float = 118.0 * inv_z
 		var card_r := Rect2(ring_c + Vector2(ring_r + 5.0 * inv_z, -card_h * 0.5), Vector2(card_w, card_h))
@@ -1525,7 +1854,7 @@ class _DynamicWorldDrawer extends Node2D:
 			draw_rect(bar_r, Color(0.14, 0.15, 0.18, 0.14), true)
 			draw_rect(Rect2(bar_r.position, Vector2(bar_r.size.x * ratio, bar_r.size.y)), ItIcons.color_of(gid), true)
 			var val_s := "%.1f/%.1f" % [cur_v, tgt_v]
-			var vcol := Color("2C7442") if ratio >= 0.99 else Color("23242B")
+			var vcol: Color = GameCatalog.status_color("good", colorblind) if ratio >= 0.99 else Color("23242B")
 			draw_string(font, Vector2(bar_r.end.x + 3.0 * inv_z, gy + 3.5 * inv_z), val_s, HORIZONTAL_ALIGNMENT_RIGHT, 48.0 * inv_z, int(8.5 * inv_z), vcol)
 
 	func _draw_reward_popup(tst: Dictionary, tp: Vector2, font: Font, inv_z: float) -> void:
@@ -1533,7 +1862,6 @@ class _DynamicWorldDrawer extends Node2D:
 		var alpha: float = clampf(1.0 - float(tst["age"]) / 1.45, 0.0, 1.0)
 		var sc: float = clampf(inv_z, 0.75, 1.35)
 
-		# Authentic RewardPopups dark pill + gold coin for delivery payouts (+$50, ⚡+$100)
 		var is_express: bool = raw_txt.begins_with("⚡+")
 		if is_express or raw_txt.begins_with("+$"):
 			var clean_txt: String = raw_txt.replace("⚡", "")
@@ -1541,16 +1869,13 @@ class _DynamicWorldDrawer extends Node2D:
 			var ph: float = 22.0 * sc
 			var box := Rect2(tp.x - pw * 0.5, tp.y - ph * 0.5, pw, ph)
 
-			# Pill background + warm cream rim (exact RewardPopups colors!)
 			draw_rect(box, Color(0.09, 0.12, 0.10, 0.93 * alpha), true)
 			draw_rect(box, Color(1.0, 0.93, 0.70, 0.90 * alpha), false, 1.6 * sc)
 
-			# Gold coin on the left
 			var coin_c := Vector2(box.position.x + 11.5 * sc, box.position.y + ph * 0.5)
 			draw_circle(coin_c, 6.2 * sc, Color(0.78, 0.56, 0.11, alpha))
 			draw_circle(coin_c, 4.4 * sc, Color(1.0, 0.84, 0.29, alpha))
 
-			# Bold gold +$50 text on the right
 			draw_string(font, Vector2(coin_c.x + 8.5 * sc, box.position.y + ph * 0.72), clean_txt, HORIZONTAL_ALIGNMENT_LEFT, pw - 22.0 * sc, int(12.5 * sc), Color(1.0, 0.84, 0.29, alpha))
 
 			if is_express:

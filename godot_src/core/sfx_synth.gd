@@ -3,7 +3,7 @@ extends Node
 
 ## Authentic Incremental Traffic UI sound engine using the original 26 WAV effects
 ## (res://sounds/ui/*.wav) with priority gating, cooldowns, pitch jitter, auto-button hooks,
-## and Android tactile haptics.
+## volume channels (Master / UI / Delivery), clean exit teardown, and Android tactile haptics.
 
 const DIR := "res://sounds/ui/"
 const UNGATED := -1
@@ -41,7 +41,12 @@ const VOICES := 12
 
 var muted: bool = false
 var haptics_enabled: bool = true
+var master_volume: float = 1.0
+var ui_volume: float = 1.0
+var delivery_volume: float = 1.0
+var money_popup_sound: bool = true
 
+var _shutting_down: bool = false
 var _streams: Dictionary = {}
 var _players: Array[AudioStreamPlayer] = []
 var _cursor: int = 0
@@ -65,11 +70,46 @@ func _ready() -> void:
 		add_child(p)
 		_players.append(p)
 
-	get_tree().node_added.connect(_hook_control)
-	_hook_subtree(get_tree().root)
+	if get_tree() != null and not get_tree().node_added.is_connected(_hook_control):
+		get_tree().node_added.connect(_hook_control)
+	if get_tree() != null and get_tree().root != null:
+		_hook_subtree(get_tree().root)
+
+func _notification(what: int) -> void:
+	if what == NOTIFICATION_WM_CLOSE_REQUEST or what == NOTIFICATION_PREDELETE:
+		shutdown()
+
+func _exit_tree() -> void:
+	shutdown()
+
+func shutdown() -> void:
+	if _shutting_down:
+		return
+	_shutting_down = true
+	muted = true
+	_flush_pending = false
+	_queued.clear()
+	if is_inside_tree() and get_tree() != null and get_tree().node_added.is_connected(_hook_control):
+		get_tree().node_added.disconnect(_hook_control)
+	for p in _players:
+		if is_instance_valid(p):
+			p.stop()
+			p.stream = null
+	_players.clear()
+	_streams.clear()
+
+func set_volumes(master_v: float, ui_v: float, delivery_v: float = 1.0) -> void:
+	master_volume = clampf(master_v, 0.0, 1.0)
+	ui_volume = clampf(ui_v, 0.0, 1.0)
+	delivery_volume = clampf(delivery_v, 0.0, 1.0)
 
 func play_ui(id: String, pitch: float = 1.0) -> void:
-	if muted or _players.is_empty() or not SOUNDS.has(id) or not _streams.has(id):
+	if _shutting_down or muted or master_volume <= 0.001 or _players.is_empty() or not SOUNDS.has(id) or not _streams.has(id):
+		return
+	var is_delivery: bool = (id == "delivery" or id == "delivery_bonus")
+	if is_delivery and (not money_popup_sound or delivery_volume <= 0.001):
+		return
+	if not is_delivery and ui_volume <= 0.001:
 		return
 	_queued[id] = pitch
 	if not _flush_pending:
@@ -78,7 +118,7 @@ func play_ui(id: String, pitch: float = 1.0) -> void:
 
 func _flush_queued() -> void:
 	_flush_pending = false
-	if muted or _players.is_empty():
+	if _shutting_down or muted or master_volume <= 0.001 or _players.is_empty():
 		_queued.clear()
 		return
 	var top: int = UNGATED
@@ -93,13 +133,18 @@ func _flush_queued() -> void:
 		var cooldown_ms: float = float(spec[2]) * 1000.0
 		if float(now - int(_last_msec.get(id, -100000))) < cooldown_ms:
 			continue
+		var is_delivery: bool = (id == "delivery" or id == "delivery_bonus")
+		var chan_gain: float = master_volume * (delivery_volume if is_delivery else ui_volume)
+		if chan_gain <= 0.001:
+			continue
 		_last_msec[id] = now
 		var p: AudioStreamPlayer = _players[_cursor]
 		_cursor = (_cursor + 1) % _players.size()
 		var base_pitch: float = float(_queued[id])
 		var jitter: float = float(spec[3])
+		p.stop()
 		p.stream = _streams[id]
-		p.volume_db = float(spec[0])
+		p.volume_db = float(spec[0]) + linear_to_db(chan_gain)
 		p.pitch_scale = base_pitch * (1.0 + randf_range(-jitter, jitter))
 		p.play()
 	_queued.clear()
@@ -110,7 +155,7 @@ func _hook_subtree(node: Node) -> void:
 		_hook_subtree(child)
 
 func _hook_control(node: Node) -> void:
-	if not (node is Control) or node.has_meta(&"_sfx_hooked"):
+	if _shutting_down or not (node is Control) or node.has_meta(&"_sfx_hooked"):
 		return
 	if node is BaseButton:
 		node.set_meta(&"_sfx_hooked", true)
@@ -128,6 +173,8 @@ func _hook_control(node: Node) -> void:
 		)
 
 func _on_button_pressed(b: BaseButton) -> void:
+	if _shutting_down or not is_instance_valid(b):
+		return
 	if b.has_meta(&"sfx"):
 		var custom_id := String(b.get_meta(&"sfx"))
 		if custom_id != "":

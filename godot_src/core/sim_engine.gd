@@ -2,7 +2,9 @@ class_name SimEngine
 extends Node
 
 ## Core deterministic simulation engine for Incremental Traffic: Karesidenan Madiun.
-## Decouples fixed-step micro-agent physics from render framerate for smooth 60-120 FPS on Android.
+## Aligns economy, fleet resale, 44 goods, Station/Harbour storage piles, multi-phase traffic lights,
+## directional lanes/pockets/turn-arrows, Express countdown bonus, and alerts with original Incremental Traffic
+## while keeping 60-120 FPS fixed-step performance on Android.
 
 signal map_static_dirty
 signal region_unlocked(region_name: String, subtitle: String)
@@ -10,6 +12,8 @@ signal banner_notify(title: String, subtitle: String, accent: Color)
 
 const HOLD_REQUIRED_SEC: float = 30.0
 const SIM_DT: float = 1.0 / 30.0
+const MAX_LOAD_WAIT_SEC: float = 20.0
+const SCRAP_WAIT_SEC: float = 5.0
 
 var sfx: SfxSynth
 var maps_list: Array = []
@@ -151,6 +155,7 @@ func _hydrate_geometry() -> void:
 		reg["center_vec"] = Vector2(float(reg["center"][0]), float(reg["center"][1]))
 		reg["aabb"] = Rect2(min_x, min_y, maxf(1.0, max_x - min_x), maxf(1.0, max_y - min_y))
 		reg["holdSeconds"] = float(reg.get("holdSeconds", 0.0))
+		reg["unlockedAtRealSec"] = float(reg.get("unlockedAtRealSec", 0.0 if bool(reg["unlocked"]) else -1.0))
 
 	for wb in water_bodies:
 		var pv := PackedVector2Array()
@@ -172,15 +177,11 @@ func _hydrate_geometry() -> void:
 
 	for j in junctions:
 		j["pos"] = Vector2(float(j["x"]), float(j["y"]))
-		if String(j["control"]) == "lights" and not j.has("light"):
-			j["light"] = _make_default_light()
-		elif j.has("light") and j["light"] != null:
-			var lt: Dictionary = j["light"]
-			lt["currentPhase"] = int(lt.get("currentPhase", 0))
-			lt["stage"] = String(lt.get("stage", "green"))
-			lt["timer"] = float(lt.get("timer", 10.0))
-			lt["greenElapsed"] = float(lt.get("greenElapsed", 0.0))
-			lt["lastDetectorHit"] = float(lt.get("lastDetectorHit", 0.0))
+		if String(j["control"]) == "lights":
+			if not j.has("light") or j["light"] == null:
+				j["light"] = _make_default_light(j)
+			else:
+				_ensure_light_schema(j)
 
 	for r in roads:
 		var pv := PackedVector2Array()
@@ -202,6 +203,9 @@ func _hydrate_geometry() -> void:
 		r["lengthPx"] = maxf(8.0, total_l)
 		r["aabb"] = Rect2(min_x - 24.0, min_y - 24.0, (max_x - min_x) + 48.0, (max_y - min_y) + 48.0)
 		r["congestionEMA"] = float(r.get("congestionEMA", 0.0))
+		r["pocketLevel"] = int(r.get("pocketLevel", 0))
+		r["turnMaskForward"] = int(r.get("turnMaskForward", RoutePathfinder.TURN_ALL))
+		r["turnMaskBackward"] = int(r.get("turnMaskBackward", RoutePathfinder.TURN_ALL))
 
 	for f in facilities:
 		f["pos"] = Vector2(float(f["x"]), float(f["y"]))
@@ -211,17 +215,22 @@ func _hydrate_geometry() -> void:
 			f["inputBuffers"] = {}
 		if not f.has("deliveredWindow") or typeof(f["deliveredWindow"]) != TYPE_DICTIONARY:
 			f["deliveredWindow"] = {}
+		if not f.has("yardPile") or typeof(f["yardPile"]) != TYPE_ARRAY:
+			f["yardPile"] = []
 		f["outputBuffer"] = int(f.get("outputBuffer", 2 if String(f["kind"]) == "supplier" else 0))
 		f["prodProgress"] = float(f.get("prodProgress", 0.0))
 		f["stalledReason"] = String(f.get("stalledReason", "none"))
+		f["stalledSec"] = float(f.get("stalledSec", 0.0))
+		f["lastGrowSec"] = float(f.get("lastGrowSec", -1000.0))
 		f["occupiedBays"] = 0
 		var kind_s := String(f["kind"])
 		f["vehiclePresent"] = true
 		f["vehicleTimer"] = 18.0
-		f["vehicleCapacityRemaining"] = 40 if kind_s == "harbour" else 20
+		f["vehicleCapacityRemaining"] = (40 + 20 * int(f["upgrades"].get("shipSize", 0))) if kind_s == "harbour" else (20 + 10 * int(f["upgrades"].get("trainLength", 0)))
+		f["boardedSlots"] = 0
 
-func _make_default_light() -> Dictionary:
-	return {
+func _make_default_light(j: Dictionary = {}) -> Dictionary:
+	var lt := {
 		"phaseAGreen": 10.0,
 		"phaseBGreen": 10.0,
 		"yellow": 1.0,
@@ -232,8 +241,72 @@ func _make_default_light() -> Dictionary:
 		"stage": "green",
 		"timer": 10.0,
 		"greenElapsed": 0.0,
-		"lastDetectorHit": 0.0
+		"lastDetectorHit": 0.0,
+		"phases": []
 	}
+	if not j.is_empty():
+		j["light"] = lt
+		_ensure_light_schema(j)
+	return lt
+
+func _ensure_light_schema(j: Dictionary) -> void:
+	if not j.has("light") or typeof(j["light"]) != TYPE_DICTIONARY:
+		j["light"] = _make_default_light()
+	var lt: Dictionary = j["light"]
+	lt["yellow"] = clampf(float(lt.get("yellow", 1.0)), 0.5, 2.5)
+	lt["allRed"] = clampf(float(lt.get("allRed", 0.8)), 0.4, 2.5)
+	lt["actuated"] = bool(lt.get("actuated", true))
+	lt["sensorGap"] = clampf(float(lt.get("sensorGap", 1.5)), 1.0, 4.0)
+	lt["currentPhase"] = int(lt.get("currentPhase", 0))
+	lt["stage"] = String(lt.get("stage", "green"))
+	lt["timer"] = float(lt.get("timer", 10.0))
+	lt["greenElapsed"] = float(lt.get("greenElapsed", 0.0))
+	lt["lastDetectorHit"] = float(lt.get("lastDetectorHit", 0.0))
+
+	var arm_ids: Array[String] = []
+	if j.has("geom") and (j["geom"] as Dictionary).has("arms"):
+		for arm in j["geom"]["arms"]:
+			arm_ids.append(String(arm["edge_id"]))
+	else:
+		for eid_v in j.get("connectedEdgeIds", []):
+			arm_ids.append(String(eid_v))
+
+	var phases: Array = lt.get("phases", []) if typeof(lt.get("phases", null)) == TYPE_ARRAY else []
+	if phases.size() < 2:
+		var g_a: float = clampf(float(lt.get("phaseAGreen", 10.0)), 2.0, 60.0)
+		var g_b: float = clampf(float(lt.get("phaseBGreen", 10.0)), 2.0, 60.0)
+		var arms_a := {}
+		var arms_b := {}
+		for idx in range(arm_ids.size()):
+			var eid: String = arm_ids[idx]
+			if idx % 2 == 0:
+				arms_a[eid] = RoutePathfinder.TURN_ALL
+				arms_b[eid] = 0
+			else:
+				arms_a[eid] = 0
+				arms_b[eid] = RoutePathfinder.TURN_ALL
+		phases = [
+			{"green": g_a, "arms": arms_a},
+			{"green": g_b, "arms": arms_b}
+		]
+		lt["phases"] = phases
+	else:
+		# Ensure any newly built road arm is present in phases
+		for idx in range(arm_ids.size()):
+			var eid: String = arm_ids[idx]
+			var has_any_green: bool = false
+			for ph in phases:
+				var a_map: Dictionary = ph.get("arms", {})
+				if int(a_map.get(eid, 0)) != 0:
+					has_any_green = true
+			if not has_any_green:
+				var target_p: int = idx % phases.size()
+				if not (phases[target_p] as Dictionary).has("arms"):
+					phases[target_p]["arms"] = {}
+				phases[target_p]["arms"][eid] = RoutePathfinder.TURN_ALL
+	lt["currentPhase"] = clampi(int(lt["currentPhase"]), 0, maxi(0, phases.size() - 1))
+	lt["phaseAGreen"] = float(phases[0].get("green", 10.0))
+	lt["phaseBGreen"] = float(phases[mini(1, phases.size() - 1)].get("green", 10.0))
 
 func _rebuild_lookups() -> void:
 	junction_map.clear()
@@ -267,6 +340,9 @@ func _refresh_network_geometry() -> void:
 				)
 				j["yieldMinorEdgeIds"] = built_edges.slice(2)
 	RoadGeom.compute_network_junction_geometry(junctions, roads, road_map, left_hand_traffic)
+	for j in junctions:
+		if String(j["control"]) == "lights":
+			_ensure_light_schema(j)
 
 func _seed_starter_routes() -> void:
 	var r0_facs: Array = []
@@ -318,6 +394,9 @@ func get_owned_count_by_model(model_id: String) -> int:
 func get_next_truck_price(model_id: String) -> int:
 	return GameCatalog.compute_truck_buy_price(model_id, get_owned_count_by_model(model_id), agents.size())
 
+func get_next_truck_resale_price(model_id: String) -> int:
+	return GameCatalog.compute_truck_resale_price(model_id, get_owned_count_by_model(model_id), agents.size())
+
 func buy_license(model_id: String) -> bool:
 	if unlocked_licenses.has(model_id) or not GameCatalog.TRUCKS.has(model_id):
 		return false
@@ -337,13 +416,41 @@ func get_capacity_slots(f: Dictionary) -> int:
 	var lvl: int = clampi(int(up.get("buffer", 0)), 0, GameCatalog.BUFFER_CAPACITIES.size() - 1)
 	return GameCatalog.BUFFER_CAPACITIES[lvl]
 
+func get_hub_vehicle_capacity_slots(f: Dictionary) -> int:
+	var kind_s := String(f["kind"])
+	if kind_s == "harbour":
+		return 40 + 20 * int(f["upgrades"].get("shipSize", 0))
+	if kind_s == "station":
+		return 20 + 10 * int(f["upgrades"].get("trainLength", 0))
+	return 0
+
+## Update 1.10 authentic on-site Station (2.0×) & Harbour (1.6×) storage yard capacity
+func get_hub_yard_capacity_slots(f: Dictionary) -> int:
+	var kind_s := String(f["kind"])
+	var v_cap: int = get_hub_vehicle_capacity_slots(f)
+	if kind_s == "station":
+		return int(round(float(v_cap) * 2.0))
+	if kind_s == "harbour":
+		return int(round(float(v_cap) * 1.6))
+	return 9999
+
+func get_hub_yard_used_slots(f: Dictionary) -> int:
+	var slots: int = 0
+	for g_raw in f.get("yardPile", []):
+		var gid := String(g_raw)
+		if GameCatalog.GOODS.has(gid):
+			slots += int(GameCatalog.GOODS[gid]["slots"])
+		else:
+			slots += 1
+	return slots
+
 func get_total_bays(f: Dictionary) -> int:
 	return 1 + int(f["upgrades"].get("bays", 0))
 
 func get_supplier_rate_per_min(f: Dictionary) -> int:
 	var up: Dictionary = f["upgrades"]
-	var base: int = int(ceil(6.0 * pow(1.25, float(up.get("rate", 0)))))
-	return int(round(float(base) * 1.61)) if int(up.get("expand", 0)) > 0 else base
+	var expanded: bool = int(up.get("expand", 0)) > 0
+	return int(ceil(6.0 * pow(1.25, float(up.get("rate", 0))) * (1.61 if expanded else 1.0) - 0.0001))
 
 func get_factory_output_per_min(f: Dictionary) -> float:
 	if f["outputGood"] == null:
@@ -378,7 +485,7 @@ func get_facility_upgrades(f: Dictionary) -> Array[Dictionary]:
 			"track": "expand", "label": "Perluasan Lahan",
 			"desc": "Output hulu ×1.61 permanen",
 			"level": e_lvl, "max": 1, "price": 80000,
-			"locked": "Maks" if e_lvl >= 1 else ("Butuh Rate Lv.6" if r_lvl < 6 else "")
+			"locked": "Maks" if e_lvl >= 1 else ("Butuh Rate Lv.10" if r_lvl < 10 else "")
 		})
 		var b_lvl: int = int(up.get("buffer", 0))
 		list.append({
@@ -412,7 +519,7 @@ func get_facility_upgrades(f: Dictionary) -> Array[Dictionary]:
 		var t_lvl: int = int(up.get("trainLength", 0))
 		list.append({
 			"track": "trainLength", "label": "Rangkaian Kereta",
-			"desc": "Kapasitas %d slot/KA" % (20 + 10 * t_lvl),
+			"desc": "%d slot/KA · Peron %d slot" % [20 + 10 * t_lvl, (20 + 10 * t_lvl) * 2],
 			"level": t_lvl, "max": 3,
 			"price": GameCatalog.round_2sig(6000.0 * pow(2.0, float(t_lvl))),
 			"locked": "Maks" if t_lvl >= 3 else ""
@@ -420,7 +527,7 @@ func get_facility_upgrades(f: Dictionary) -> Array[Dictionary]:
 		var tt_lvl: int = int(up.get("timetable", 0))
 		list.append({
 			"track": "timetable", "label": "Jadwal KA (Timetable)",
-			"desc": "Pangkas jeda tunggu kereta",
+			"desc": "Jeda tunggu KA ×%.1f" % GameCatalog.TIMETABLE_WAIT_FACTORS[clampi(tt_lvl, 0, 3)],
 			"level": tt_lvl, "max": 3,
 			"price": GameCatalog.round_2sig(6000.0 * pow(2.0, float(tt_lvl))),
 			"locked": "Maks" if tt_lvl >= 3 else ""
@@ -429,7 +536,7 @@ func get_facility_upgrades(f: Dictionary) -> Array[Dictionary]:
 		var sh_lvl: int = int(up.get("shipSize", 0))
 		list.append({
 			"track": "shipSize", "label": "Tonase Kapal Kargo",
-			"desc": "Kapasitas %d slot/kapal" % (40 + 20 * sh_lvl),
+			"desc": "%d slot/kapal · Dermaga %d slot" % [40 + 20 * sh_lvl, int(round(float(40 + 20 * sh_lvl) * 1.6))],
 			"level": sh_lvl, "max": 3,
 			"price": GameCatalog.round_2sig(6000.0 * pow(2.0, float(sh_lvl))),
 			"locked": "Maks" if sh_lvl >= 3 else ""
@@ -437,7 +544,7 @@ func get_facility_upgrades(f: Dictionary) -> Array[Dictionary]:
 		var tt_lvl: int = int(up.get("timetable", 0))
 		list.append({
 			"track": "timetable", "label": "Jadwal Pelayaran",
-			"desc": "Percepat kedatangan kapal",
+			"desc": "Jeda tunggu kapal ×%.1f" % GameCatalog.TIMETABLE_WAIT_FACTORS[clampi(tt_lvl, 0, 3)],
 			"level": tt_lvl, "max": 3,
 			"price": GameCatalog.round_2sig(6000.0 * pow(2.0, float(tt_lvl))),
 			"locked": "Maks" if tt_lvl >= 3 else ""
@@ -450,10 +557,10 @@ func get_facility_upgrades(f: Dictionary) -> Array[Dictionary]:
 		"track": "bays", "label": "Dermaga Muat (Bays)",
 		"desc": "%d truk bongkar/muat paralel" % total_bays,
 		"level": bay_lvl, "max": 7,
-		"price": GameCatalog.round_2sig(500.0 * pow(2.0, float(maxi(0, bay_lvl - 1)))),
+		"price": GameCatalog.round_2sig(500.0 * pow(2.0, float(bay_lvl))),
 		"locked": "Maks" if bay_lvl >= 7 else ("Butuh Wide Gate" if needs_gate else "")
 	})
-	if total_bays >= 5 or int(up.get("wideGate", 0)) > 0:
+	if total_bays >= 6 or int(up.get("wideGate", 0)) > 0:
 		var wg: int = int(up.get("wideGate", 0))
 		list.append({
 			"track": "wideGate", "label": "Gerbang Lebar (Wide Gate)",
@@ -461,14 +568,13 @@ func get_facility_upgrades(f: Dictionary) -> Array[Dictionary]:
 			"level": wg, "max": 1, "price": 10000,
 			"locked": "Terpasang" if wg >= 1 else ""
 		})
-	if total_bays >= 4 or int(up.get("exitRoad", 0)) > 0:
-		var ex: int = int(up.get("exitRoad", 0))
-		list.append({
-			"track": "exitRoad", "label": "Jalan Keluar Khusus",
-			"desc": "Waktu bongkar/muat −35%",
-			"level": ex, "max": 1, "price": 20000,
-			"locked": "Terpasang" if ex >= 1 else ""
-		})
+	var ex: int = int(up.get("exitRoad", 0))
+	list.append({
+		"track": "exitRoad", "label": "Jalan Keluar Khusus",
+		"desc": "Waktu bongkar/muat −35%",
+		"level": ex, "max": 1, "price": 20000,
+		"locked": "Terpasang" if ex >= 1 else ""
+	})
 	return list
 
 func buy_facility_upgrade(fac_id: String, track: String) -> bool:
@@ -484,9 +590,12 @@ func buy_facility_upgrade(fac_id: String, track: String) -> bool:
 			var pr: int = int(info["price"])
 			cash -= pr
 			f["upgrades"][track] = int(f["upgrades"].get(track, 0)) + 1
+			f["lastGrowSec"] = real_time_sec
 			spawn_toast(f["pos"] + Vector2(0, -18), "-" + GameCatalog.fmt_cash(pr), Color("#e67e22"))
+			map_static_dirty.emit()
 			if sfx:
-				sfx.tap()
+				sfx.play_ui("purchase")
+				sfx.play_ui("building_slam")
 			return true
 	return false
 
@@ -518,6 +627,7 @@ func create_route(from_fac_id: String, to_fac_id: String, good_filter: String = 
 		"toFacilityId": to_fac_id,
 		"goodFilter": resolved_good,
 		"waypoints": [],
+		"sameWayBack": true,
 		"truckModel": "hauler",
 		"forwardPath": [],
 		"returnPath": [],
@@ -525,14 +635,15 @@ func create_route(from_fac_id: String, to_fac_id: String, good_filter: String = 
 		"brokenReason": "",
 		"activeTruckIds": [],
 		"totalRevenue": 0,
-		"deliveriesCount": 0
+		"deliveriesCount": 0,
+		"openedAtSec": real_time_sec
 	}
 	recompute_single_route(rt)
 	routes.append(rt)
 	if buy_first_truck:
 		add_truck_to_route(String(rt["id"]), false)
 	if sfx:
-		sfx.tap()
+		sfx.play_ui("route_opened")
 	return rt
 
 func delete_route(route_id: String) -> void:
@@ -544,7 +655,7 @@ func delete_route(route_id: String) -> void:
 				remove_truck_from_route(route_id, String(tid))
 			routes.remove_at(i)
 			if sfx:
-				sfx.tap()
+				sfx.play_ui("remove")
 			return
 
 func toggle_route_waypoint(route_id: String, junction_id: String) -> void:
@@ -560,12 +671,30 @@ func toggle_route_waypoint(route_id: String, junction_id: String) -> void:
 	if idx >= 0:
 		wps.remove_at(idx)
 	else:
-		if wps.size() >= 3:
+		if wps.size() >= 4:
 			wps.pop_front()
 		wps.append(junction_id)
 	recompute_single_route(rt)
 	if sfx:
-		sfx.tap()
+		sfx.play_ui("edit")
+
+func set_route_same_way_back(route_id: String, enabled: bool) -> void:
+	var rt: Dictionary = get_route(route_id)
+	if rt.is_empty():
+		return
+	rt["sameWayBack"] = enabled
+	recompute_single_route(rt)
+	if sfx:
+		sfx.play_ui("tick")
+
+func clear_route_waypoints(route_id: String) -> void:
+	var rt: Dictionary = get_route(route_id)
+	if rt.is_empty():
+		return
+	(rt["waypoints"] as Array).clear()
+	recompute_single_route(rt)
+	if sfx:
+		sfx.play_ui("remove")
 
 func get_route(route_id: String) -> Dictionary:
 	for r in routes:
@@ -578,24 +707,43 @@ func recompute_single_route(rt: Dictionary) -> void:
 	var f_to: Dictionary = facility_map.get(String(rt["toFacilityId"]), {})
 	if f_from.is_empty() or f_to.is_empty():
 		return
+	var wps_fwd: Array = rt.get("waypoints", [])
 	var fwd: Dictionary = RoutePathfinder.find_directed_path(
 		String(f_from["junctionId"]),
 		String(f_to["junctionId"]),
-		rt["waypoints"],
+		wps_fwd,
 		junction_map,
 		road_map,
 		unlocked_regions,
 		String(rt["truckModel"])
 	)
+	var ret_wps: Array = []
+	if bool(rt.get("sameWayBack", true)) and not wps_fwd.is_empty():
+		ret_wps = wps_fwd.duplicate()
+		ret_wps.reverse()
 	var ret: Dictionary = RoutePathfinder.find_directed_path(
 		String(f_to["junctionId"]),
 		String(f_from["junctionId"]),
-		[],
+		ret_wps,
 		junction_map,
 		road_map,
 		unlocked_regions,
 		String(rt["truckModel"])
 	)
+	# Graceful fallback to direct return if reversed waypoints hit a one-way street
+	if String(ret["broken_reason"]) != "" and not ret_wps.is_empty():
+		var ret_direct: Dictionary = RoutePathfinder.find_directed_path(
+			String(f_to["junctionId"]),
+			String(f_from["junctionId"]),
+			[],
+			junction_map,
+			road_map,
+			unlocked_regions,
+			String(rt["truckModel"])
+		)
+		if String(ret_direct["broken_reason"]) == "":
+			ret = ret_direct
+
 	rt["forwardPath"] = fwd["steps"]
 	rt["returnPath"] = ret["steps"]
 	rt["clearTimeForwardSec"] = maxf(3.5, float(fwd["clear_time_sec"]))
@@ -614,6 +762,13 @@ func add_truck_to_route(route_id: String, free_starter: bool = false) -> bool:
 		return false
 	var model_id := String(rt["truckModel"])
 	var tdef: Dictionary = GameCatalog.TRUCKS[model_id]
+	var g_filter := String(rt.get("goodFilter", "any"))
+	if g_filter != "any" and GameCatalog.GOODS.has(g_filter):
+		if GameCatalog.compute_max_carry_units(model_id, g_filter) <= 0:
+			if sfx:
+				sfx.warn()
+			return false
+
 	if not unlocked_licenses.has(model_id) and not free_starter:
 		var lic: int = int(tdef["license_price"])
 		if cash < lic:
@@ -641,17 +796,23 @@ func add_truck_to_route(route_id: String, free_starter: bool = false) -> bool:
 		"id": _next_uid("trk"),
 		"routeId": route_id,
 		"model": model_id,
+		"isStarter": free_starter,
 		"state": "loading",
 		"waitReason": "none",
+		"lastIssue": "",
 		"stepIndex": 0,
 		"sPx": 0.0,
 		"laneIndex": 0,
 		"visualLane": 0.0,
 		"speedPx": 0.0,
+		"braking": false,
+		"turnSignal": 0,
 		"cargoGood": "",
 		"cargoQty": 0,
 		"departedSec": real_time_sec,
+		"expressWindowSec": 0.0,
 		"expressDeadlineSec": 0.0,
+		"expressBonusLocked": -1.0,
 		"dwellSec": 0.35 + float((rt["activeTruckIds"] as Array).size()) * 0.55,
 		"waitSec": 0.0,
 		"junctionWaitSec": 0.0,
@@ -665,7 +826,7 @@ func add_truck_to_route(route_id: String, free_starter: bool = false) -> bool:
 	if not free_starter:
 		spawn_toast(fpos + Vector2(0, -14), "-" + GameCatalog.fmt_cash(price), Color("#e67e22"))
 		if sfx:
-			sfx.tap()
+			sfx.play_ui("purchase")
 	return true
 
 func remove_truck_from_route(route_id: String, specific_id: String = "") -> bool:
@@ -679,32 +840,44 @@ func remove_truck_from_route(route_id: String, specific_id: String = "") -> bool
 	for i in range(agents.size()):
 		if String(agents[i]["id"]) == target_id:
 			var ag: Dictionary = agents[i]
-			var refund: int = int(round(float(GameCatalog.TRUCKS[String(ag["model"])]["base_price"]) * 0.5))
+			var model_id := String(ag["model"])
+			var owned_m: int = get_owned_count_by_model(model_id)
+			var total_f: int = agents.size()
+			var refund: int = GameCatalog.compute_truck_resale_price(model_id, owned_m, total_f)
 			cash += refund
 			spawn_toast(ag["pos"] + Vector2(0, -12), "+" + GameCatalog.fmt_cash(refund), Color("#2b8a3e"))
 			agents.remove_at(i)
 			break
 	tids.erase(target_id)
 	if sfx:
-		sfx.tap()
+		sfx.play_ui("sell")
 	return true
 
 func quote_route_model_swap(route_id: String, target_model: String) -> Dictionary:
 	var rt: Dictionary = get_route(route_id)
-	if rt.is_empty():
+	if rt.is_empty() or not GameCatalog.TRUCKS.has(target_model):
 		return {}
 	var count: int = (rt["activeTruckIds"] as Array).size()
 	var lic: int = 0 if unlocked_licenses.has(target_model) else int(GameCatalog.TRUCKS[target_model]["license_price"])
-	var old_base: int = int(GameCatalog.TRUCKS[String(rt["truckModel"])]["base_price"])
-	var refund: int = int(round(float(old_base) * 0.5)) * count
+	var old_model := String(rt["truckModel"])
+	var owned_old: int = get_owned_count_by_model(old_model)
+	var fleet_cur: int = agents.size()
+	var refund: int = 0
+	for i in range(count):
+		refund += GameCatalog.compute_truck_resale_price(old_model, maxi(1, owned_old - i), maxi(1, fleet_cur - i))
 
 	var owned_target: int = get_owned_count_by_model(target_model)
-	if String(rt["truckModel"]) == target_model:
+	if old_model == target_model:
 		owned_target = maxi(0, owned_target - count)
-	var fleet_after_sell: int = maxi(0, agents.size() - count)
+	var fleet_after_sell: int = maxi(0, fleet_cur - count)
 	var buy_cost: int = 0
 	for i in range(count):
 		buy_cost += GameCatalog.compute_truck_buy_price(target_model, owned_target + i, fleet_after_sell + i)
+
+	var compatible: bool = true
+	var gf := String(rt.get("goodFilter", "any"))
+	if gf != "any" and GameCatalog.GOODS.has(gf):
+		compatible = GameCatalog.compute_max_carry_units(target_model, gf) > 0
 
 	return {
 		"targetModel": target_model,
@@ -712,7 +885,8 @@ func quote_route_model_swap(route_id: String, target_model: String) -> Dictionar
 		"license": lic,
 		"refund": refund,
 		"buyCost": buy_cost,
-		"netCost": lic + buy_cost - refund
+		"netCost": lic + buy_cost - refund,
+		"compatible": compatible
 	}
 
 func apply_route_model_swap(route_id: String, target_model: String) -> bool:
@@ -720,6 +894,10 @@ func apply_route_model_swap(route_id: String, target_model: String) -> bool:
 	if rt.is_empty() or String(rt["truckModel"]) == target_model:
 		return false
 	var q: Dictionary = quote_route_model_swap(route_id, target_model)
+	if q.is_empty() or not bool(q.get("compatible", true)):
+		if sfx:
+			sfx.warn()
+		return false
 	var net: int = int(q["netCost"])
 	if cash < net:
 		if sfx:
@@ -738,7 +916,7 @@ func apply_route_model_swap(route_id: String, target_model: String) -> bool:
 			ag["trailerPoses"] = tp
 	recompute_single_route(rt)
 	if sfx:
-		sfx.tap()
+		sfx.play_ui("purchase")
 	return true
 
 # === TRAFFIC ENGINEERING RULES ===
@@ -758,9 +936,10 @@ func apply_junction_control(junction_id: String, tool: String) -> String:
 			j["control"] = "none"
 			j["yieldMinorEdgeIds"] = []
 			_refresh_network_geometry()
+			recompute_all_routes()
 			map_static_dirty.emit()
 			if sfx:
-				sfx.tap()
+				sfx.play_ui("remove")
 			return "Rambu Yield dilepas"
 		if deg < 3:
 			return "Yield butuh minimal simpang 3 lengan"
@@ -774,9 +953,10 @@ func apply_junction_control(junction_id: String, tool: String) -> String:
 		)
 		j["yieldMinorEdgeIds"] = edges_sorted.slice(2)
 		_refresh_network_geometry()
+		recompute_all_routes()
 		map_static_dirty.emit()
 		if sfx:
-			sfx.tap()
+			sfx.play_ui("place")
 		return "Rambu Yield dipasang ($0)"
 
 	if tool == "roundabout":
@@ -792,9 +972,10 @@ func apply_junction_control(junction_id: String, tool: String) -> String:
 			j["control"] = "roundabout2"
 			spawn_toast(j["pos"] + Vector2(0, -16), "-" + GameCatalog.fmt_cash(up_p), Color("#e67e22"))
 			_refresh_network_geometry()
+			recompute_all_routes()
 			map_static_dirty.emit()
 			if sfx:
-				sfx.tap()
+				sfx.play_ui("purchase")
 			return "Bundaran ditingkatkan ke 2 Lajur!"
 		if cur_ctrl == "roundabout2":
 			var ref2: int = int(round(float(int(GameCatalog.INFRA_PRICES["roundabout"]) + int(GameCatalog.INFRA_PRICES["roundabout2_upgrade"])) * 0.5))
@@ -802,9 +983,10 @@ func apply_junction_control(junction_id: String, tool: String) -> String:
 			j["control"] = "none"
 			spawn_toast(j["pos"] + Vector2(0, -16), "+" + GameCatalog.fmt_cash(ref2), Color("#2b8a3e"))
 			_refresh_network_geometry()
+			recompute_all_routes()
 			map_static_dirty.emit()
 			if sfx:
-				sfx.tap()
+				sfx.play_ui("remove")
 			return "Bundaran dibongkar (+%s)" % GameCatalog.fmt_cash(ref2)
 		var rb_p: int = int(GameCatalog.INFRA_PRICES["roundabout"])
 		if cash < rb_p:
@@ -816,16 +998,18 @@ func apply_junction_control(junction_id: String, tool: String) -> String:
 		j["control"] = "roundabout"
 		spawn_toast(j["pos"] + Vector2(0, -16), "-" + GameCatalog.fmt_cash(rb_p), Color("#e67e22"))
 		_refresh_network_geometry()
+		recompute_all_routes()
 		map_static_dirty.emit()
 		if sfx:
-			sfx.tap()
+			sfx.play_ui("place")
 		return "Bundaran dibangun!"
 
 	if tool == "lights":
 		if cur_ctrl == "lights":
+			_ensure_light_schema(j)
 			if sfx:
-				sfx.tap()
-			return "Mengatur durasi lampu lalu lintas"
+				sfx.play_ui("edit")
+			return "Mengatur fase & sensor lampu lalu lintas"
 		var lt_p: int = int(GameCatalog.INFRA_PRICES["light"])
 		if cash < lt_p:
 			if sfx:
@@ -834,15 +1018,153 @@ func apply_junction_control(junction_id: String, tool: String) -> String:
 		_refund_junction_hardware(j)
 		cash -= lt_p
 		j["control"] = "lights"
-		j["light"] = _make_default_light()
+		_make_default_light(j)
 		spawn_toast(j["pos"] + Vector2(0, -16), "-" + GameCatalog.fmt_cash(lt_p), Color("#e67e22"))
 		_refresh_network_geometry()
+		recompute_all_routes()
 		map_static_dirty.emit()
 		if sfx:
-			sfx.tap()
-		return "Lampu lalu lintas teraktuasi dipasang!"
+			sfx.play_ui("place")
+		return "Lampu lalu lintas multi-fase dipasang!"
 
 	return ""
+
+func rotate_yield_priority(junction_id: String) -> String:
+	if not junction_map.has(junction_id):
+		return ""
+	var j: Dictionary = junction_map[junction_id]
+	if String(j["control"]) != "yield":
+		return ""
+	var built: Array = []
+	for eid_v in j["connectedEdgeIds"]:
+		var eid := String(eid_v)
+		if road_map.has(eid) and bool(road_map[eid]["isBuilt"]):
+			built.append(eid)
+	if built.size() < 3:
+		return ""
+	var cur_minor: Array = j["yieldMinorEdgeIds"]
+	var first_major_idx: int = 0
+	for i in range(built.size()):
+		if not cur_minor.has(built[i]):
+			first_major_idx = i
+			break
+	var next_m0: int = (first_major_idx + 1) % built.size()
+	var next_m1: int = (next_m0 + 1) % built.size()
+	var new_minor: Array = []
+	for i in range(built.size()):
+		if i != next_m0 and i != next_m1:
+			new_minor.append(built[i])
+	j["yieldMinorEdgeIds"] = new_minor
+	_refresh_network_geometry()
+	recompute_all_routes()
+	map_static_dirty.emit()
+	if sfx:
+		sfx.play_ui("edit")
+	return "Poros utama Yield diputar"
+
+# === MULTI-PHASE TRAFFIC LIGHT CONTROLS ===
+
+func add_light_phase(junction_id: String) -> bool:
+	if not junction_map.has(junction_id):
+		return false
+	var j: Dictionary = junction_map[junction_id]
+	if String(j["control"]) != "lights":
+		return false
+	_ensure_light_schema(j)
+	var phases: Array = j["light"]["phases"]
+	if phases.size() >= 4:
+		return false
+	var arms_new := {}
+	var conn: Array = j["connectedEdgeIds"]
+	if not conn.is_empty():
+		var pick_eid := String(conn[phases.size() % conn.size()])
+		arms_new[pick_eid] = RoutePathfinder.TURN_ALL
+	phases.append({"green": 10.0, "arms": arms_new})
+	recompute_all_routes()
+	map_static_dirty.emit()
+	if sfx:
+		sfx.play_ui("edit")
+	return true
+
+func remove_light_phase(junction_id: String, phase_idx: int) -> bool:
+	if not junction_map.has(junction_id):
+		return false
+	var j: Dictionary = junction_map[junction_id]
+	if String(j["control"]) != "lights":
+		return false
+	_ensure_light_schema(j)
+	var lt: Dictionary = j["light"]
+	var phases: Array = lt["phases"]
+	if phases.size() <= 2 or phase_idx < 0 or phase_idx >= phases.size():
+		return false
+	phases.remove_at(phase_idx)
+	lt["currentPhase"] = clampi(int(lt["currentPhase"]), 0, phases.size() - 1)
+	lt["phaseAGreen"] = float(phases[0]["green"])
+	lt["phaseBGreen"] = float(phases[mini(1, phases.size() - 1)]["green"])
+	recompute_all_routes()
+	map_static_dirty.emit()
+	if sfx:
+		sfx.play_ui("remove")
+	return true
+
+func set_light_phase_green(junction_id: String, phase_idx: int, seconds: float) -> void:
+	if not junction_map.has(junction_id):
+		return
+	var j: Dictionary = junction_map[junction_id]
+	if String(j["control"]) != "lights":
+		return
+	_ensure_light_schema(j)
+	var lt: Dictionary = j["light"]
+	var phases: Array = lt["phases"]
+	if phase_idx < 0 or phase_idx >= phases.size():
+		return
+	var g_sec: float = clampf(seconds, 2.0, 60.0)
+	phases[phase_idx]["green"] = g_sec
+	if phase_idx == 0:
+		lt["phaseAGreen"] = g_sec
+	elif phase_idx == 1:
+		lt["phaseBGreen"] = g_sec
+
+const TURN_MASK_CYCLE: Array[int] = [0, 7, 3, 6, 2, 1, 4]
+
+static func format_turn_mask(mask: int) -> String:
+	match mask:
+		0:
+			return "STOP"
+		7:
+			return "↰↑↱ Semua"
+		3:
+			return "↰↑ Kiri+Lurus"
+		6:
+			return "↑↱ Lurus+Kanan"
+		2:
+			return "↑ Lurus"
+		1:
+			return "↰ Belok Kiri"
+		4:
+			return "↱ Belok Kanan"
+	return "↰↑↱"
+
+func cycle_light_arm_turn_mask(junction_id: String, phase_idx: int, edge_id: String) -> int:
+	if not junction_map.has(junction_id):
+		return 0
+	var j: Dictionary = junction_map[junction_id]
+	if String(j["control"]) != "lights":
+		return 0
+	_ensure_light_schema(j)
+	var phases: Array = j["light"]["phases"]
+	if phase_idx < 0 or phase_idx >= phases.size():
+		return 0
+	var arms: Dictionary = phases[phase_idx]["arms"]
+	var cur: int = int(arms.get(edge_id, 0))
+	var pos: int = TURN_MASK_CYCLE.find(cur)
+	var nxt: int = TURN_MASK_CYCLE[(pos + 1) % TURN_MASK_CYCLE.size()]
+	arms[edge_id] = nxt
+	recompute_all_routes()
+	map_static_dirty.emit()
+	if sfx:
+		sfx.play_ui("tick")
+	return nxt
 
 func remove_traffic_lights(junction_id: String) -> void:
 	if not junction_map.has(junction_id):
@@ -856,9 +1178,10 @@ func remove_traffic_lights(junction_id: String) -> void:
 	j.erase("light")
 	spawn_toast(j["pos"] + Vector2(0, -16), "+" + GameCatalog.fmt_cash(ref), Color("#2b8a3e"))
 	_refresh_network_geometry()
+	recompute_all_routes()
 	map_static_dirty.emit()
 	if sfx:
-		sfx.tap()
+		sfx.play_ui("remove")
 
 func _refund_junction_hardware(j: Dictionary) -> void:
 	var c := String(j["control"])
@@ -870,7 +1193,7 @@ func _refund_junction_hardware(j: Dictionary) -> void:
 	elif c == "roundabout2":
 		cash += int(round(float(int(GameCatalog.INFRA_PRICES["roundabout"]) + int(GameCatalog.INFRA_PRICES["roundabout2_upgrade"])) * 0.5))
 
-func modify_road_lanes(edge_id: String, delta: int) -> String:
+func modify_road_lanes(edge_id: String, delta: int, dir_mode: String = "both") -> String:
 	if not road_map.has(edge_id):
 		return ""
 	var r: Dictionary = road_map[edge_id]
@@ -878,40 +1201,99 @@ func modify_road_lanes(edge_id: String, delta: int) -> String:
 		return ""
 	var pts: PackedVector2Array = r["pts"]
 	var mid: Vector2 = pts[pts.size() / 2]
-	var cur_lanes: int = int(r["lanesForward"])
+	var lf: int = int(r["lanesForward"])
+	var lb: int = int(r["lanesBackward"])
+	var edit_f: bool = (dir_mode == "both" or dir_mode == "forward")
+	var edit_b: bool = (dir_mode == "both" or dir_mode == "backward")
+	var unit_scale: float = 0.5 if dir_mode != "both" else 1.0
 
 	if delta > 0:
-		if cur_lanes >= 4:
+		if (edit_f and lf >= 4) or (edit_b and lb >= 4):
 			return "Maksimal 4 lajur per arah"
-		var nxt: int = cur_lanes + 1
-		var price: int = GameCatalog.round_2sig(float(GameCatalog.INFRA_PRICES["lane_base"]) + float(GameCatalog.INFRA_PRICES["lane_per_px"]) * float(r["lengthPx"])) * maxi(1, nxt - 1)
+		var top_nxt: int = maxi(lf + (1 if edit_f else 0), lb + (1 if edit_b else 0))
+		var base_p: int = GameCatalog.round_2sig(float(GameCatalog.INFRA_PRICES["lane_base"]) + float(GameCatalog.INFRA_PRICES["lane_per_px"]) * float(r["lengthPx"])) * maxi(1, top_nxt - 1)
+		var price: int = maxi(250, int(round(float(base_p) * unit_scale)))
 		if cash < price:
 			if sfx:
 				sfx.warn()
 			return "Kas kurang (%s)" % GameCatalog.fmt_cash(price)
 		cash -= price
-		r["lanesForward"] = nxt
-		r["lanesBackward"] = nxt
+		if edit_f:
+			r["lanesForward"] = lf + 1
+		if edit_b:
+			r["lanesBackward"] = lb + 1
 		spawn_toast(mid, "-" + GameCatalog.fmt_cash(price), Color("#e67e22"))
 		_refresh_network_geometry()
 		map_static_dirty.emit()
 		if sfx:
-			sfx.tap()
-		return "%s diperlebar ke %d lajur" % [String(r["name"]), nxt]
+			sfx.play_ui("place")
+		return "%s: %d/%d lajur" % [String(r["name"]), int(r["lanesForward"]), int(r["lanesBackward"])]
 	else:
-		if cur_lanes <= 1:
-			return "Minimal 1 lajur jalan"
-		var paid: int = GameCatalog.round_2sig(float(GameCatalog.INFRA_PRICES["lane_base"]) + float(GameCatalog.INFRA_PRICES["lane_per_px"]) * float(r["lengthPx"])) * maxi(1, cur_lanes - 1)
-		var refund: int = int(round(float(paid) * 0.5))
+		if (edit_f and lf <= 1) or (edit_b and lb <= 1):
+			return "Minimal 1 lajur per arah"
+		var cur_top: int = maxi(lf, lb)
+		var base_paid: int = GameCatalog.round_2sig(float(GameCatalog.INFRA_PRICES["lane_base"]) + float(GameCatalog.INFRA_PRICES["lane_per_px"]) * float(r["lengthPx"])) * maxi(1, cur_top - 1)
+		var refund: int = maxi(125, int(round(float(base_paid) * 0.5 * unit_scale)))
 		cash += refund
-		r["lanesForward"] = cur_lanes - 1
-		r["lanesBackward"] = cur_lanes - 1
+		if edit_f:
+			r["lanesForward"] = lf - 1
+		if edit_b:
+			r["lanesBackward"] = lb - 1
 		spawn_toast(mid, "+" + GameCatalog.fmt_cash(refund), Color("#2b8a3e"))
 		_refresh_network_geometry()
 		map_static_dirty.emit()
 		if sfx:
-			sfx.tap()
-		return "%s dikurangi ke %d lajur (+%s)" % [String(r["name"]), cur_lanes - 1, GameCatalog.fmt_cash(refund)]
+			sfx.play_ui("remove")
+		return "%s: %d/%d lajur (+%s)" % [String(r["name"]), int(r["lanesForward"]), int(r["lanesBackward"]), GameCatalog.fmt_cash(refund)]
+
+func cycle_road_pocket(edge_id: String) -> String:
+	if not road_map.has(edge_id):
+		return ""
+	var r: Dictionary = road_map[edge_id]
+	if not bool(r["isBuilt"]) or not unlocked_regions.has(int(r["regionIndex"])):
+		return ""
+	var cur: int = clampi(int(r.get("pocketLevel", 0)), 0, 3)
+	var nxt: int = (cur + 1) % 4
+	var pts: PackedVector2Array = r["pts"]
+	var mid: Vector2 = pts[pts.size() / 2]
+	var step_p: int = int(GameCatalog.INFRA_PRICES["pocket"])
+	if nxt > cur:
+		if cash < step_p:
+			if sfx:
+				sfx.warn()
+			return "Kas kurang untuk Kantong Belok (%s)" % GameCatalog.fmt_cash(step_p)
+		cash -= step_p
+		spawn_toast(mid, "-" + GameCatalog.fmt_cash(step_p), Color("#e67e22"))
+	else:
+		var refund: int = int(round(float(step_p * cur) * 0.5))
+		if refund > 0:
+			cash += refund
+			spawn_toast(mid, "+" + GameCatalog.fmt_cash(refund), Color("#2b8a3e"))
+	r["pocketLevel"] = nxt
+	_refresh_network_geometry()
+	map_static_dirty.emit()
+	if sfx:
+		sfx.play_ui("edit")
+	return "%s Kantong Simpang: %s" % [String(r["name"]), GameCatalog.POCKET_LABELS[nxt]]
+
+const LANE_ARROW_CYCLE: Array[int] = [7, 3, 6, 2, 1, 4]
+
+func cycle_road_turn_mask(edge_id: String, forward_dir: bool = true) -> String:
+	if not road_map.has(edge_id):
+		return ""
+	var r: Dictionary = road_map[edge_id]
+	if not bool(r["isBuilt"]) or not unlocked_regions.has(int(r["regionIndex"])):
+		return ""
+	var key := "turnMaskForward" if forward_dir else "turnMaskBackward"
+	var cur: int = int(r.get(key, 7))
+	var idx: int = LANE_ARROW_CYCLE.find(cur)
+	var nxt: int = LANE_ARROW_CYCLE[(idx + 1) % LANE_ARROW_CYCLE.size()]
+	r[key] = nxt
+	recompute_all_routes()
+	map_static_dirty.emit()
+	if sfx:
+		sfx.play_ui("edit")
+	return "%s (%s): %s" % [String(r["name"]), "Maju" if forward_dir else "Balik", format_turn_mask(nxt)]
 
 func cycle_road_one_way(edge_id: String) -> String:
 	if not road_map.has(edge_id):
@@ -925,9 +1307,33 @@ func cycle_road_one_way(edge_id: String) -> String:
 	recompute_all_routes()
 	map_static_dirty.emit()
 	if sfx:
-		sfx.tap()
+		sfx.play_ui("edit")
 	var label := "Dua Arah" if int(r["oneWay"]) == 0 else ("Satu Arah →" if int(r["oneWay"]) == 1 else "Satu Arah ←")
 	return "%s: %s" % [String(r["name"]), label]
+
+func count_routes_cut_by_closing(edge_id: String) -> int:
+	if not road_map.has(edge_id):
+		return 0
+	var r: Dictionary = road_map[edge_id]
+	if bool(r["closed"]):
+		return 0
+	var cut: int = 0
+	for rt in routes:
+		if String(rt["brokenReason"]) != "":
+			continue
+		var uses_edge: bool = false
+		for st in rt["forwardPath"]:
+			if String(st["edgeId"]) == edge_id:
+				uses_edge = true
+				break
+		if not uses_edge:
+			for st in rt["returnPath"]:
+				if String(st["edgeId"]) == edge_id:
+					uses_edge = true
+					break
+		if uses_edge:
+			cut += 1
+	return cut
 
 func toggle_close_street(edge_id: String) -> String:
 	if not road_map.has(edge_id):
@@ -943,7 +1349,7 @@ func toggle_close_street(edge_id: String) -> String:
 		recompute_all_routes()
 		map_static_dirty.emit()
 		if sfx:
-			sfx.tap()
+			sfx.play_ui("place")
 		return "%s dibuka kembali ($0)" % String(r["name"])
 	var price: int = int(GameCatalog.INFRA_PRICES["close_street"])
 	if cash < price:
@@ -958,7 +1364,7 @@ func toggle_close_street(edge_id: String) -> String:
 	recompute_all_routes()
 	map_static_dirty.emit()
 	if sfx:
-		sfx.tap()
+		sfx.play_ui("remove")
 	return "%s ditutup menjadi taman kota" % String(r["name"])
 
 func purchase_road_offer(offer_id: String) -> String:
@@ -990,7 +1396,6 @@ func purchase_road_offer(offer_id: String) -> String:
 # === MAIN FIXED-TIMESTEP SIMULATION LOOP ===
 
 func step_frame(frame_dt: float) -> void:
-	# Update floating cash toasts smoothly at render rate
 	for i in range(floating_toasts.size() - 1, -1, -1):
 		floating_toasts[i]["age"] = float(floating_toasts[i]["age"]) + frame_dt
 		if float(floating_toasts[i]["age"]) > 1.45:
@@ -1032,8 +1437,10 @@ func _step_facilities(dt: float) -> void:
 			var slot_sz: int = int(GameCatalog.GOODS[out_g]["slots"])
 			if int(f["outputBuffer"]) * slot_sz >= cap:
 				f["stalledReason"] = "output_full"
+				f["stalledSec"] = float(f.get("stalledSec", 0.0)) + dt
 			else:
 				f["stalledReason"] = "none"
+				f["stalledSec"] = 0.0
 				var rate_sec: float = float(get_supplier_rate_per_min(f)) / 60.0
 				f["prodProgress"] = float(f["prodProgress"]) + rate_sec * dt
 				while float(f["prodProgress"]) >= 1.0 and int(f["outputBuffer"]) * slot_sz < cap:
@@ -1046,6 +1453,7 @@ func _step_facilities(dt: float) -> void:
 			var slot_sz: int = int(gdef["slots"])
 			if int(f["outputBuffer"]) * slot_sz >= cap:
 				f["stalledReason"] = "output_full"
+				f["stalledSec"] = float(f.get("stalledSec", 0.0)) + dt
 				continue
 			var in_bufs: Dictionary = f["inputBuffers"]
 			var has_inputs: bool = true
@@ -1055,8 +1463,10 @@ func _step_facilities(dt: float) -> void:
 					break
 			if not has_inputs:
 				f["stalledReason"] = "missing_input"
+				f["stalledSec"] = float(f.get("stalledSec", 0.0)) + dt
 				continue
 			f["stalledReason"] = "none"
+			f["stalledSec"] = 0.0
 			var out_rate_sec: float = get_factory_output_per_min(f) / 60.0
 			f["prodProgress"] = float(f["prodProgress"]) + out_rate_sec * dt
 			if float(f["prodProgress"]) >= 1.0:
@@ -1069,27 +1479,54 @@ func _step_facilities(dt: float) -> void:
 		elif k == "station" or k == "harbour":
 			var tt_lvl: int = clampi(int(f["upgrades"].get("timetable", 0)), 0, 3)
 			var wait_factor: float = GameCatalog.TIMETABLE_WAIT_FACTORS[tt_lvl]
+			var v_cap: int = get_hub_vehicle_capacity_slots(f)
+			var pile: Array = f["yardPile"]
+
+			# While train/ship is docked, load cargo continuously from on-site yardPile onto vehicle!
+			if bool(f["vehiclePresent"]) and not pile.is_empty() and int(f["vehicleCapacityRemaining"]) > 0:
+				while not pile.is_empty():
+					var first_g := String(pile[0])
+					var g_slots: int = int(GameCatalog.GOODS.get(first_g, {"slots": 1})["slots"])
+					if int(f["vehicleCapacityRemaining"]) < g_slots:
+						break
+					pile.pop_front()
+					f["vehicleCapacityRemaining"] = int(f["vehicleCapacityRemaining"]) - g_slots
+					f["boardedSlots"] = int(f.get("boardedSlots", 0)) + g_slots
+
 			f["vehicleTimer"] = float(f["vehicleTimer"]) - dt
+			# Depart early once full, or when dwell timer expires
+			if bool(f["vehiclePresent"]) and int(f["vehicleCapacityRemaining"]) <= 0 and float(f["vehicleTimer"]) > 1.2:
+				f["vehicleTimer"] = 1.2
+
 			if float(f["vehicleTimer"]) <= 0.0:
 				if bool(f["vehiclePresent"]):
 					var away_sec: float = (7.5 if k == "station" else 10.0) * wait_factor
-					if away_sec <= 0.45:
+					if away_sec <= 0.05:
+						# Timetable Lv.3 (0.0 factor): next train/ship arrives immediately with zero gap!
 						f["vehiclePresent"] = true
-						f["vehicleTimer"] = 18.0
-						f["vehicleCapacityRemaining"] = (40 + 20 * int(f["upgrades"].get("shipSize", 0))) if k == "harbour" else (20 + 10 * int(f["upgrades"].get("trainLength", 0)))
+						f["vehicleTimer"] = 18.0 if k == "station" else 22.0
+						f["vehicleCapacityRemaining"] = v_cap
+						f["boardedSlots"] = 0
 					else:
 						f["vehiclePresent"] = false
 						f["vehicleTimer"] = away_sec
 				else:
 					f["vehiclePresent"] = true
 					f["vehicleTimer"] = 18.0 if k == "station" else 22.0
-					f["vehicleCapacityRemaining"] = (40 + 20 * int(f["upgrades"].get("shipSize", 0))) if k == "harbour" else (20 + 10 * int(f["upgrades"].get("trainLength", 0)))
+					f["vehicleCapacityRemaining"] = v_cap
+					f["boardedSlots"] = 0
 
 func get_edge_phase_at_junction(j: Dictionary, edge_id: String) -> int:
+	if j.has("light") and typeof(j["light"]) == TYPE_DICTIONARY and (j["light"] as Dictionary).has("phases"):
+		var phases: Array = j["light"]["phases"]
+		for p_i in range(phases.size()):
+			var arms: Dictionary = phases[p_i].get("arms", {})
+			if int(arms.get(edge_id, 0)) != 0:
+				return p_i
 	if j.has("geom") and (j["geom"] as Dictionary).has("arms"):
-		var arms: Array = j["geom"]["arms"]
-		for i in range(arms.size()):
-			if String(arms[i]["edge_id"]) == edge_id:
+		var arms_g: Array = j["geom"]["arms"]
+		for i in range(arms_g.size()):
+			if String(arms_g[i]["edge_id"]) == edge_id:
 				return 0 if (i % 2 == 0) else 1
 	var idx: int = (j["connectedEdgeIds"] as Array).find(edge_id)
 	return 0 if (idx < 0 or idx % 2 == 0) else 1
@@ -1097,17 +1534,60 @@ func get_edge_phase_at_junction(j: Dictionary, edge_id: String) -> int:
 func _get_edge_phase_at_junction(j: Dictionary, edge_id: String) -> int:
 	return get_edge_phase_at_junction(j, edge_id)
 
+## Checks multi-phase signal head + green-continuation across consecutive phases (Update 1.8)
+func is_movement_green_at_light(j: Dictionary, in_edge_id: String, in_fwd: bool, out_edge_id: String, out_fwd: bool) -> bool:
+	if not j.has("light") or typeof(j["light"]) != TYPE_DICTIONARY:
+		return true
+	_ensure_light_schema(j)
+	var lt: Dictionary = j["light"]
+	var phases: Array = lt["phases"]
+	if phases.is_empty():
+		return true
+	var cur_p: int = clampi(int(lt["currentPhase"]), 0, phases.size() - 1)
+	var t_bit: int = RoutePathfinder.classify_turn_bit(junction_map, road_map, in_edge_id, in_fwd, String(j["id"]), out_edge_id, out_fwd)
+	var cur_mask: int = int((phases[cur_p].get("arms", {}) as Dictionary).get(in_edge_id, 0))
+	var stage := String(lt["stage"])
+	if stage == "green":
+		return (cur_mask & t_bit) != 0
+	# Green continuation: if both currentPhase and nextPhase allow this exact movement, keep green through yellow/allred!
+	var nxt_p: int = (cur_p + 1) % phases.size()
+	var nxt_mask: int = int((phases[nxt_p].get("arms", {}) as Dictionary).get(in_edge_id, 0))
+	return ((cur_mask & t_bit) != 0) and ((nxt_mask & t_bit) != 0) and phases.size() > 1 and nxt_p != cur_p
+
+func get_arm_signal_state(j: Dictionary, edge_id: String) -> String:
+	if not j.has("light") or typeof(j["light"]) != TYPE_DICTIONARY:
+		return "green"
+	_ensure_light_schema(j)
+	var lt: Dictionary = j["light"]
+	var phases: Array = lt["phases"]
+	if phases.is_empty():
+		return "green"
+	var cur_p: int = clampi(int(lt["currentPhase"]), 0, phases.size() - 1)
+	var cur_mask: int = int((phases[cur_p].get("arms", {}) as Dictionary).get(edge_id, 0))
+	var stage := String(lt["stage"])
+	if cur_mask == 0:
+		return "red"
+	if stage == "green":
+		return "green"
+	var nxt_p: int = (cur_p + 1) % phases.size()
+	var nxt_mask: int = int((phases[nxt_p].get("arms", {}) as Dictionary).get(edge_id, 0))
+	if nxt_p != cur_p and (cur_mask & nxt_mask) == cur_mask:
+		return "green"
+	return "yellow" if stage == "yellow" else "red"
+
 func _step_traffic_lights(dt: float) -> void:
 	for j in junctions:
 		if String(j["control"]) != "lights" or not j.has("light"):
 			continue
+		_ensure_light_schema(j)
 		var lt: Dictionary = j["light"]
+		var phases: Array = lt["phases"]
+		var cur_p: int = clampi(int(lt["currentPhase"]), 0, phases.size() - 1)
 		lt["timer"] = float(lt["timer"]) - dt
 		if String(lt["stage"]) == "green":
 			lt["greenElapsed"] = float(lt["greenElapsed"]) + dt
-			var target_green: float = float(lt["phaseAGreen"]) if int(lt["currentPhase"]) == 0 else float(lt["phaseBGreen"])
-			# Actuated gap-out sensor
-			if bool(lt["actuated"]) and float(lt["greenElapsed"]) >= 3.5:
+			var target_green: float = float(phases[cur_p].get("green", 10.0))
+			if bool(lt["actuated"]) and float(lt["greenElapsed"]) >= minf(4.0, target_green):
 				var gap_idle: float = real_time_sec - float(lt["lastDetectorHit"])
 				if gap_idle >= float(lt["sensorGap"]):
 					lt["timer"] = 0.0
@@ -1120,18 +1600,29 @@ func _step_traffic_lights(dt: float) -> void:
 				lt["timer"] = maxf(0.4, float(lt["allRed"]))
 		else:
 			if float(lt["timer"]) <= 0.0:
-				var nxt_phase: int = 1 if int(lt["currentPhase"]) == 0 else 0
+				var nxt_phase: int = (cur_p + 1) % phases.size()
 				lt["currentPhase"] = nxt_phase
 				lt["stage"] = "green"
 				lt["greenElapsed"] = 0.0
 				lt["lastDetectorHit"] = real_time_sec
-				lt["timer"] = float(lt["phaseAGreen"]) if nxt_phase == 0 else float(lt["phaseBGreen"])
+				lt["timer"] = float(phases[nxt_phase].get("green", 10.0))
+
+func get_agent_express_bonus_left(ag: Dictionary) -> float:
+	if String(ag.get("model", "")) != "express" or int(ag.get("cargoQty", 0)) <= 0:
+		return -1.0
+	var locked: float = float(ag.get("expressBonusLocked", -1.0))
+	if locked >= 0.0:
+		return locked
+	var win: float = float(ag.get("expressWindowSec", 0.0))
+	var dl: float = float(ag.get("expressDeadlineSec", 0.0))
+	if win <= 0.0 or dl <= 0.0:
+		return -1.0
+	return clampf((dl - real_time_sec) / win, 0.0, 1.0)
 
 func _step_agents(dt: float) -> void:
 	for f in facilities:
 		f["occupiedBays"] = 0
 
-	# Bucket active driving agents by directed road key "edgeId:1" / "edgeId:0"
 	var lane_buckets: Dictionary = {}
 	for ag in agents:
 		var st := String(ag["state"])
@@ -1152,11 +1643,11 @@ func _step_agents(dt: float) -> void:
 	for k in lane_buckets.keys():
 		(lane_buckets[k] as Array).sort_custom(func(a, b): return float(a["sPx"]) > float(b["sPx"]))
 
-	# Update congestion EMA per road
 	for r in roads:
 		var rid := String(r["id"])
 		var cnt: int = (lane_buckets.get(rid + ":1", []) as Array).size() + (lane_buckets.get(rid + ":0", []) as Array).size()
-		var cap_est: float = maxf(1.5, (float(r["lengthPx"]) / 34.0) * float(int(r["lanesForward"]) + int(r["lanesBackward"])) * 0.5)
+		var pocket_bonus: float = 1.0 + 0.14 * float(int(r.get("pocketLevel", 0)))
+		var cap_est: float = maxf(1.5, (float(r["lengthPx"]) / 34.0) * float(int(r["lanesForward"]) + int(r["lanesBackward"])) * 0.5 * pocket_bonus)
 		var ratio: float = minf(1.5, float(cnt) / cap_est)
 		r["congestionEMA"] = float(r["congestionEMA"]) * 0.94 + ratio * 0.06
 
@@ -1168,21 +1659,32 @@ func _step_agents(dt: float) -> void:
 		var st := String(ag["state"])
 
 		if st == "loading":
+			ag["braking"] = false
+			ag["turnSignal"] = 0
 			_update_loading_agent(ag, rt, dt)
 		elif st == "queuing_bay":
+			ag["braking"] = true
+			ag["turnSignal"] = 0
 			var f_to: Dictionary = facility_map[String(rt["toFacilityId"])]
+			# Lock Express on-time bonus as soon as truck reaches destination entrance!
+			if String(ag["model"]) == "express" and float(ag.get("expressBonusLocked", -1.0)) < 0.0:
+				var win: float = maxf(1.0, float(ag.get("expressWindowSec", 1.0)))
+				ag["expressBonusLocked"] = clampf((float(ag["expressDeadlineSec"]) - real_time_sec) / win, 0.0, 1.0) if real_time_sec <= float(ag["expressDeadlineSec"]) else 0.0
 			if int(f_to["occupiedBays"]) < get_total_bays(f_to):
 				f_to["occupiedBays"] = int(f_to["occupiedBays"]) + 1
 				ag["state"] = "unloading"
 				ag["waitReason"] = "none"
 				var exit_mult: float = 0.65 if int(f_to["upgrades"].get("exitRoad", 0)) > 0 else 1.0
-				var c_slots: int = int(GameCatalog.GOODS[String(ag["cargoGood"])]["slots"]) * maxi(1, int(ag["cargoQty"])) if String(ag["cargoGood"]) != "" else 1
-				ag["dwellSec"] = maxf(0.45, 0.85 * float(c_slots) * exit_mult)
+				var c_slots: int = int(GameCatalog.GOODS[String(ag["cargoGood"])]["slots"]) * maxi(1, int(ag["cargoQty"])) if String(ag["cargoGood"]) != "" else 0
+				ag["dwellSec"] = 0.25 if c_slots <= 0 else maxf(0.45, 0.80 * float(c_slots) * exit_mult)
 				ag["waitSec"] = 0.0
 			else:
 				ag["waitReason"] = "bay_full"
+				ag["waitSec"] = float(ag["waitSec"]) + dt
 				ag["speedPx"] = 0.0
 		elif st == "unloading":
+			ag["braking"] = false
+			ag["turnSignal"] = 0
 			_update_unloading_agent(ag, rt, dt)
 		elif st == "driving_outbound" or st == "driving_return":
 			_update_driving_agent(ag, rt, tdef, lane_buckets, dt)
@@ -1192,7 +1694,8 @@ func _update_loading_agent(ag: Dictionary, rt: Dictionary, dt: float) -> void:
 	ag["pos"] = f_from["pos"]
 	ag["speedPx"] = 0.0
 	if String(rt["brokenReason"]) != "":
-		ag["waitReason"] = "cargo_wait"
+		ag["waitReason"] = "broken_route"
+		ag["waitSec"] = float(ag["waitSec"]) + dt
 		return
 	ag["dwellSec"] = float(ag["dwellSec"]) - dt
 	if float(ag["dwellSec"]) > 0.0:
@@ -1210,15 +1713,33 @@ func _update_loading_agent(ag: Dictionary, rt: Dictionary, dt: float) -> void:
 		ag["cargoGood"] = good_to_load
 		ag["cargoQty"] = take
 		ag["departedSec"] = real_time_sec
-		ag["expressDeadlineSec"] = real_time_sec + float(rt["clearTimeForwardSec"]) * 1.35 + 3.0
+		var win_sec: float = float(rt["clearTimeForwardSec"]) * 1.35 + 3.0
+		ag["expressWindowSec"] = win_sec
+		ag["expressDeadlineSec"] = real_time_sec + win_sec
+		ag["expressBonusLocked"] = -1.0
 		ag["state"] = "driving_outbound"
 		ag["stepIndex"] = 0
 		ag["sPx"] = 0.0
 		ag["waitSec"] = 0.0
 		ag["waitReason"] = "none"
+		ag["lastIssue"] = ""
 	else:
 		ag["waitSec"] = float(ag["waitSec"]) + dt
 		ag["waitReason"] = "cargo_wait"
+		# Authentic TruckOperator MAX_WAIT (20s): depart empty to release loading bay rather than blocking forever
+		if float(ag["waitSec"]) >= MAX_LOAD_WAIT_SEC:
+			ag["cargoGood"] = ""
+			ag["cargoQty"] = 0
+			ag["departedSec"] = real_time_sec
+			ag["expressWindowSec"] = 0.0
+			ag["expressDeadlineSec"] = 0.0
+			ag["expressBonusLocked"] = -1.0
+			ag["state"] = "driving_outbound"
+			ag["stepIndex"] = 0
+			ag["sPx"] = 0.0
+			ag["waitSec"] = 0.0
+			ag["waitReason"] = "none"
+			ag["lastIssue"] = "Berangkat kosong dari %s (>20 dtk)" % String(f_from["name"])
 
 func _update_unloading_agent(ag: Dictionary, rt: Dictionary, dt: float) -> void:
 	var f_to: Dictionary = facility_map[String(rt["toFacilityId"])]
@@ -1230,25 +1751,34 @@ func _update_unloading_agent(ag: Dictionary, rt: Dictionary, dt: float) -> void:
 
 	var c_good := String(ag["cargoGood"])
 	var c_qty: int = int(ag["cargoQty"])
-	if c_good != "" and c_qty > 0:
+	if c_good != "" and c_qty > 0 and GameCatalog.GOODS.has(c_good):
 		var gdef: Dictionary = GameCatalog.GOODS[c_good]
+		var g_slots: int = int(gdef["slots"])
 		var can_accept: bool = false
 		var fk := String(f_to["kind"])
 
 		if fk == "factory":
 			var cur_in: int = int(f_to["inputBuffers"].get(c_good, 0))
-			if (cur_in + c_qty) * int(gdef["slots"]) <= get_capacity_slots(f_to):
+			if (cur_in + c_qty) * g_slots <= get_capacity_slots(f_to):
 				f_to["inputBuffers"][c_good] = cur_in + c_qty
 				can_accept = true
 		elif fk == "station" or fk == "harbour":
-			if bool(f_to["vehiclePresent"]) and int(f_to["vehicleCapacityRemaining"]) >= c_qty * int(gdef["slots"]):
-				f_to["vehicleCapacityRemaining"] = int(f_to["vehicleCapacityRemaining"]) - c_qty * int(gdef["slots"])
+			# Authentic Station (2.0×) & Harbour (1.6×) on-site storage yard pile!
+			var yard_used: int = get_hub_yard_used_slots(f_to)
+			var yard_cap: int = get_hub_yard_capacity_slots(f_to)
+			if yard_used + c_qty * g_slots <= yard_cap:
+				var pile: Array = f_to["yardPile"]
+				for _u in range(c_qty):
+					pile.append(c_good)
 				can_accept = true
 		elif fk == "market":
 			can_accept = true
 
 		if can_accept:
-			var is_express_hit: bool = String(ag["model"]) == "express" and real_time_sec <= float(ag["expressDeadlineSec"])
+			var is_express_hit: bool = false
+			if String(ag["model"]) == "express":
+				var locked_b: float = float(ag.get("expressBonusLocked", -1.0))
+				is_express_hit = (locked_b > 0.0) if locked_b >= 0.0 else (real_time_sec <= float(ag["expressDeadlineSec"]))
 			var bonus: int = 2 if is_express_hit else 1
 			var payout: int = int(gdef["value"]) * c_qty * bonus
 			cash += payout
@@ -1262,18 +1792,20 @@ func _update_unloading_agent(ag: Dictionary, rt: Dictionary, dt: float) -> void:
 				sfx.coin(is_express_hit)
 			ag["cargoGood"] = ""
 			ag["cargoQty"] = 0
+			ag["expressBonusLocked"] = -1.0
 		else:
-			# 5s scrap fallback at 10% value prevents permanent bay gridlock
 			ag["waitSec"] = float(ag["waitSec"]) + dt
 			ag["waitReason"] = "scrap_wait"
-			if float(ag["waitSec"]) < 5.0:
+			if float(ag["waitSec"]) < SCRAP_WAIT_SEC:
 				return
 			var scrap_pay: int = maxi(1, int(round(float(int(gdef["value"]) * c_qty) * 0.10)))
 			cash += scrap_pay
 			revenue_events.append({"t": real_time_sec, "amount": scrap_pay})
 			spawn_toast(f_to["pos"] + Vector2(0, -14), "Scrap +" + GameCatalog.fmt_cash(scrap_pay), Color("#868e96"))
+			ag["lastIssue"] = "Kargo di-scrap di %s (gudang penuh)" % String(f_to["name"])
 			ag["cargoGood"] = ""
 			ag["cargoQty"] = 0
+			ag["expressBonusLocked"] = -1.0
 
 	ag["state"] = "driving_return"
 	ag["stepIndex"] = 0
@@ -1335,12 +1867,19 @@ func _get_step_trajectory(path: Array, step_idx: int, lane_idx: int) -> Dictiona
 	var cum_road: PackedFloat32Array = RoadGeom.build_cum_lengths(stitched)
 	var stop_s: float = cum_road[cum_road.size() - 1] if cum_road.size() > 0 else 4.0
 
+	var turn_sig: int = 0
 	if has_next:
 		var j_ahead: Dictionary = junction_map.get(String(step_d["toJunctionId"]), {})
 		if not j_ahead.is_empty():
 			var nxt_step: Dictionary = path[step_idx + 1]
-			var nxt_edge: Dictionary = road_map[String(nxt_step["edgeId"])]
+			var nxt_eid := String(nxt_step["edgeId"])
+			var nxt_edge: Dictionary = road_map[nxt_eid]
 			var nxt_fwd: bool = bool(nxt_step["forward"])
+			var t_bit: int = RoutePathfinder.classify_turn_bit(junction_map, road_map, eid, forward, String(j_ahead["id"]), nxt_eid, nxt_fwd)
+			if t_bit == RoutePathfinder.TURN_LEFT:
+				turn_sig = -1
+			elif t_bit == RoutePathfinder.TURN_RIGHT:
+				turn_sig = 1
 			var nxt_lanes: int = maxi(1, int(nxt_edge["lanesForward"]) if nxt_fwd else int(nxt_edge["lanesBackward"]))
 			var out_lane: int = mini(clamped_lane, nxt_lanes - 1)
 			var conn: PackedVector2Array = RoadGeom.build_turn_connector_pts(
@@ -1357,7 +1896,8 @@ func _get_step_trajectory(path: Array, step_idx: int, lane_idx: int) -> Dictiona
 		"pts": stitched,
 		"cum_len": cum_all,
 		"stop_s": stop_s,
-		"total_len": tot_l
+		"total_len": tot_l,
+		"turn_sig": turn_sig
 	}
 	_turn_curve_cache[cache_key] = entry
 	return entry
@@ -1396,11 +1936,13 @@ func _update_driving_agent(ag: Dictionary, rt: Dictionary, tdef: Dictionary, lan
 		return
 	var edge: Dictionary = road_map[eid]
 	var forward: bool = bool(step_d["forward"])
-	var lanes_dir: int = maxi(1, int(edge["lanesForward"]) if forward else int(edge["lanesBackward"]))
-	if int(ag["laneIndex"]) >= lanes_dir:
-		ag["laneIndex"] = lanes_dir - 1
+	var pocket_lvl: int = int(edge.get("pocketLevel", 0))
+	var base_lanes_dir: int = maxi(1, int(edge["lanesForward"]) if forward else int(edge["lanesBackward"]))
+	var lanes_dir: int = mini(4, base_lanes_dir + (1 if pocket_lvl > 0 and float(ag["sPx"]) > maxf(8.0, float(edge["lengthPx"]) - (22.0 + 16.0 * float(pocket_lvl))) else 0))
+	if int(ag["laneIndex"]) >= base_lanes_dir:
+		ag["laneIndex"] = base_lanes_dir - 1
 
-	var traj: Dictionary = _get_step_trajectory(path, s_idx, int(ag["laneIndex"]))
+	var traj: Dictionary = _get_step_trajectory(path, s_idx, mini(int(ag["laneIndex"]), base_lanes_dir - 1))
 	var stop_s: float = float(traj["stop_s"])
 	var step_total_len: float = float(traj["total_len"])
 
@@ -1415,9 +1957,9 @@ func _update_driving_agent(ag: Dictionary, rt: Dictionary, tdef: Dictionary, lan
 			if leader.is_empty() or float(other["sPx"]) < float(leader["sPx"]):
 				leader = other
 
-	# Cooperative overtake on multi-lane roads (only before junction stop line)
+	# Cooperative overtake on multi-lane roads or turn pockets
 	if float(ag["sPx"]) < stop_s - 8.0 and not leader.is_empty() and lanes_dir > 1 and float(leader["sPx"]) - float(ag["sPx"]) < float(tdef["body_len"]) + 20.0 and float(leader["speedPx"]) < float(tdef["max_speed_px"]) * 0.72:
-		for cand_lane in range(lanes_dir):
+		for cand_lane in range(base_lanes_dir):
 			if cand_lane == int(ag["laneIndex"]):
 				continue
 			var clear_lane: bool = true
@@ -1452,19 +1994,25 @@ func _update_driving_agent(ag: Dictionary, rt: Dictionary, tdef: Dictionary, lan
 			target_v = minf(target_v, float(leader["speedPx"]) * 0.90)
 			ag["waitReason"] = "following"
 
-	# Stop/yield control strictly BEFORE stop_s (vehicles already past stop_s clear the junction/roundabout!)
 	var cab_stop_line: float = maxf(0.0, stop_s - float(tdef["cab_len"]) * 0.48 - 1.4)
 	var dist_to_stop: float = cab_stop_line - float(ag["sPx"])
+	ag["turnSignal"] = int(traj.get("turn_sig", 0)) if dist_to_stop < 44.0 else 0
+
+	var nxt_eid: String = eid
+	var nxt_fwd: bool = forward
+	if (s_idx + 1) < path.size():
+		nxt_eid = String(path[s_idx + 1]["edgeId"])
+		nxt_fwd = bool(path[s_idx + 1]["forward"])
+
 	var j_ahead: Dictionary = junction_map.get(String(step_d["toJunctionId"]), {})
 	if not j_ahead.is_empty():
 		var ctrl := String(j_ahead["control"])
 		if float(ag["sPx"]) <= cab_stop_line + 1.5 and dist_to_stop < 48.0:
 			if ctrl == "lights" and j_ahead.has("light"):
 				var lt: Dictionary = j_ahead["light"]
-				var my_phase: int = get_edge_phase_at_junction(j_ahead, eid)
-				if int(lt["currentPhase"]) == my_phase and String(lt["stage"]) == "green":
+				if is_movement_green_at_light(j_ahead, eid, forward, nxt_eid, nxt_fwd):
 					lt["lastDetectorHit"] = real_time_sec
-					target_v = minf(target_v, 44.0)
+					target_v = minf(target_v, 48.0)
 				else:
 					if dist_to_stop <= 3.2:
 						target_v = 0.0
@@ -1472,45 +2020,60 @@ func _update_driving_agent(ag: Dictionary, rt: Dictionary, tdef: Dictionary, lan
 					else:
 						target_v = minf(target_v, maxf(5.5, dist_to_stop * 0.95))
 			elif ctrl == "yield":
+				# Update 1.9 authentic rule: ONLY minor arms check/yield; priority main-road trucks keep full road speed!
 				var is_minor: bool = (j_ahead["yieldMinorEdgeIds"] as Array).has(eid)
-				if is_minor and dist_to_stop <= 8.5 and float(ag["junctionWaitSec"]) < 1.2:
-					if _has_junction_conflict(String(j_ahead["id"]), eid):
+				if is_minor:
+					if dist_to_stop <= 8.5 and float(ag["junctionWaitSec"]) < 1.35 and _has_junction_conflict(String(j_ahead["id"]), eid):
 						target_v = 0.0
 						ag["waitReason"] = "yield"
-				elif String(ag["model"]) != "express":
-					target_v = minf(target_v, 36.0)
+					elif dist_to_stop < 22.0:
+						target_v = minf(target_v, 28.0)
 			elif ctrl == "roundabout" or ctrl == "roundabout2":
 				var cap_rb: int = 4 if ctrl == "roundabout2" else 2
 				var rb_rad: float = float((j_ahead.get("geom", {}) as Dictionary).get("r_outer", 18.0)) + 4.0
-				if dist_to_stop <= 7.0 and float(ag["junctionWaitSec"]) < 0.9 and _count_near_junction(String(j_ahead["id"]), rb_rad) >= cap_rb:
+				if dist_to_stop <= 7.0 and float(ag["junctionWaitSec"]) < 0.95 and _count_near_junction(String(j_ahead["id"]), rb_rad) >= cap_rb:
 					target_v = 0.0
 					ag["waitReason"] = "roundabout"
 				else:
-					target_v = minf(target_v, 34.0 if ctrl == "roundabout2" else 27.0)
+					target_v = minf(target_v, 36.0 if ctrl == "roundabout2" else 28.0)
 		elif float(ag["sPx"]) > cab_stop_line + 1.5:
-			# Inside junction / roundabout circulatory ring: smooth cornering speed
 			if ctrl == "roundabout" or ctrl == "roundabout2":
-				target_v = minf(target_v, 33.0 if ctrl == "roundabout2" else 26.0)
+				target_v = minf(target_v, 34.0 if ctrl == "roundabout2" else 27.0)
+			elif ctrl == "yield" and not (j_ahead["yieldMinorEdgeIds"] as Array).has(eid) and int(traj.get("turn_sig", 0)) == 0:
+				# Priority straight-through on main road keeps brisk speed
+				target_v = minf(target_v, 54.0)
 			else:
-				target_v = minf(target_v, 38.0)
+				target_v = minf(target_v, 40.0)
 
-	var cur_v: float = float(ag["speedPx"])
+	var prev_v: float = float(ag["speedPx"])
+	var cur_v: float = prev_v
 	if cur_v < target_v:
 		cur_v = minf(target_v, cur_v + float(tdef["accel"]) * dt)
 	else:
 		cur_v = maxf(target_v, cur_v - float(tdef["decel"]) * dt)
+
+	ag["braking"] = (cur_v < prev_v - 4.5 * dt) or (cur_v < 4.0 and String(ag["waitReason"]) != "none")
 	ag["speedPx"] = cur_v
 
+	# Smooth 3-Stage Conflict / Gridlock Escalation (replaces abrupt 25s teleport!)
 	if cur_v < 0.8:
 		ag["junctionWaitSec"] = float(ag["junctionWaitSec"]) + dt
 		ag["gridlockSec"] = float(ag["gridlockSec"]) + dt
-		if float(ag["gridlockSec"]) > 25.0:
-			cur_v = 22.0
+		var gl: float = float(ag["gridlockSec"])
+		var wr := String(ag["waitReason"])
+		if gl > 3.5 and (wr == "yield" or wr == "roundabout"):
+			cur_v = 9.5
+			ag["speedPx"] = cur_v
+		elif gl > 9.0 and wr != "red_light":
+			cur_v = 14.0
+			ag["speedPx"] = cur_v
+		elif gl > 18.0:
+			cur_v = 20.0
 			ag["speedPx"] = cur_v
 			ag["gridlockSec"] = 0.0
 	else:
 		ag["junctionWaitSec"] = 0.0
-		ag["gridlockSec"] = 0.0
+		ag["gridlockSec"] = maxf(0.0, float(ag["gridlockSec"]) - dt * 2.0)
 
 	ag["sPx"] = float(ag["sPx"]) + cur_v * dt
 	ag["visualLane"] = lerpf(float(ag["visualLane"]), float(ag["laneIndex"]), minf(1.0, dt * 8.0))
@@ -1550,15 +2113,16 @@ func _update_driving_agent(ag: Dictionary, rt: Dictionary, tdef: Dictionary, lan
 			t_poses[ti]["heading"] = ang
 			t_poses[ti]["pos"] = lead_p - Vector2(cos(ang), sin(ang)) * spacing
 
-
 func _finish_agent_leg(ag: Dictionary, rt: Dictionary) -> void:
 	ag["speedPx"] = 0.0
+	ag["turnSignal"] = 0
 	if String(ag["state"]) == "driving_outbound":
 		ag["state"] = "queuing_bay"
 		ag["pos"] = facility_map[String(rt["toFacilityId"])]["pos"]
 	else:
 		ag["state"] = "loading"
 		ag["dwellSec"] = 0.55
+		ag["waitSec"] = 0.0
 		ag["pos"] = facility_map[String(rt["fromFacilityId"])]["pos"]
 
 func _has_junction_conflict(j_id: String, minor_edge_id: String) -> bool:
@@ -1641,7 +2205,6 @@ func _step_upkeep_and_goals(dt: float) -> void:
 		if cash_history.size() > 60:
 			cash_history.pop_front()
 
-	# Evaluate active locked region gate OR Boomtown endless goal
 	var next_locked: Dictionary = get_active_goal_region()
 	if not next_locked.is_empty() and not bool(next_locked["unlocked"]):
 		var all_met: bool = true
@@ -1692,12 +2255,13 @@ func get_active_goal_region() -> Dictionary:
 			return reg
 	return regions[regions.size() - 1] if not regions.is_empty() else {}
 
+## Authentic CityGoals delivery rate: counts demand hubs (Station, Harbour, Market) only!
 func get_global_delivery_rate_per_min(good_id: String) -> float:
 	var cutoff: float = real_time_sec - 60.0
 	var count: int = 0
 	for f in facilities:
 		var k := String(f["kind"])
-		if k != "station" and k != "harbour" and k != "market" and k != "factory":
+		if k != "station" and k != "harbour" and k != "market":
 			continue
 		var ts: Array = f["deliveredWindow"].get(good_id, [])
 		for t in ts:
@@ -1717,6 +2281,63 @@ func get_upkeep_per_min() -> int:
 	for ag in agents:
 		s += int(GameCatalog.TRUCKS[String(ag["model"])]["upkeep_min"])
 	return s
+
+## Authentic Overview Alerts generator (broken routes, idle trucks, stalled facilities, congested streets)
+func get_system_alerts() -> Array[Dictionary]:
+	var out: Array[Dictionary] = []
+	for rt in routes:
+		var br := String(rt.get("brokenReason", ""))
+		if br != "":
+			var f_from: Dictionary = facility_map.get(String(rt["fromFacilityId"]), {})
+			out.append({
+				"kind": "broken_route",
+				"severity": "bad",
+				"title": "Rute Terputus: %s" % String(rt["name"]),
+				"subtitle": br,
+				"pos": f_from.get("pos", Vector2.ZERO),
+				"routeId": String(rt["id"])
+			})
+	for ag in agents:
+		var wr := String(ag.get("waitReason", "none"))
+		var ws: float = float(ag.get("waitSec", 0.0))
+		if ws >= 10.0 and (wr == "cargo_wait" or wr == "bay_full" or wr == "scrap_wait"):
+			var rt_a: Dictionary = get_route(String(ag["routeId"]))
+			var desc := "Menunggu muatan (%.0f dtk)" % ws if wr == "cargo_wait" else ("Antre dermaga muat (%.0f dtk)" % ws if wr == "bay_full" else "Gudang tujuan penuh!")
+			out.append({
+				"kind": "idle_truck",
+				"severity": "warn" if wr != "scrap_wait" else "bad",
+				"title": "Truk Tertahan (%s)" % String(rt_a.get("name", ag["id"])),
+				"subtitle": desc,
+				"pos": ag["pos"],
+				"routeId": String(ag["routeId"])
+			})
+	for f in facilities:
+		if not unlocked_regions.has(int(f["regionIndex"])):
+			continue
+		var sr := String(f.get("stalledReason", "none"))
+		var ss: float = float(f.get("stalledSec", 0.0))
+		if sr != "none" and ss >= 12.0:
+			out.append({
+				"kind": "facility_stall",
+				"severity": "warn",
+				"title": "%s: %s" % [String(f["name"]), "Gudang Output Penuh" if sr == "output_full" else "Kekurangan Bahan Input"],
+				"subtitle": "Terhenti %.0f dtk — klik untuk inspeksi" % ss,
+				"pos": f["pos"],
+				"facilityId": String(f["id"])
+			})
+	for r in roads:
+		if bool(r["isBuilt"]) and unlocked_regions.has(int(r["regionIndex"])) and float(r.get("congestionEMA", 0.0)) >= 0.85:
+			var pts: PackedVector2Array = r["pts"]
+			var mid: Vector2 = pts[pts.size() / 2] if not pts.is_empty() else Vector2.ZERO
+			out.append({
+				"kind": "congestion",
+				"severity": "bad" if float(r["congestionEMA"]) >= 1.1 else "warn",
+				"title": "Kemacetan Tinggi: %s" % String(r["name"]),
+				"subtitle": "Kepadatan %d%% — tambah lajur, lampu, atau bundaran" % int(round(float(r["congestionEMA"]) * 100.0)),
+				"pos": mid,
+				"edgeId": String(r["id"])
+			})
+	return out
 
 func spawn_toast(pos: Vector2, text: String, col: Color) -> void:
 	if floating_toasts.size() > 24:
@@ -1740,7 +2361,10 @@ func save_to_disk() -> void:
 	for r in roads:
 		save_roads.append({
 			"id": r["id"], "lf": r["lanesForward"], "lb": r["lanesBackward"],
-			"ow": r["oneWay"], "cl": r["closed"], "built": r["isBuilt"]
+			"ow": r["oneWay"], "cl": r["closed"], "built": r["isBuilt"],
+			"pk": r.get("pocketLevel", 0),
+			"tmf": r.get("turnMaskForward", 7),
+			"tmb": r.get("turnMaskBackward", 7)
 		})
 	var save_juncs: Array = []
 	for j in junctions:
@@ -1750,17 +2374,21 @@ func save_to_disk() -> void:
 		})
 	var save_facs: Array = []
 	for f in facilities:
-		save_facs.append({"id": f["id"], "up": f["upgrades"], "out": f["outputBuffer"]})
+		save_facs.append({
+			"id": f["id"], "up": f["upgrades"],
+			"out": f["outputBuffer"], "pile": f.get("yardPile", [])
+		})
 	var save_routes: Array = []
 	for rt in routes:
 		save_routes.append({
 			"from": rt["fromFacilityId"], "to": rt["toFacilityId"],
 			"good": rt["goodFilter"], "wps": rt["waypoints"],
+			"swb": rt.get("sameWayBack", true),
 			"model": rt["truckModel"], "cnt": (rt["activeTruckIds"] as Array).size()
 		})
 
 	var payload := {
-		"v": 1,
+		"v": 2,
 		"cash": cash,
 		"time": real_time_sec,
 		"lht": left_hand_traffic,
@@ -1805,6 +2433,7 @@ func _restore_save(map_id: String) -> bool:
 		var ri: int = int(r_idx)
 		if ri >= 0 and ri < regions.size():
 			regions[ri]["unlocked"] = true
+			regions[ri]["unlockedAtRealSec"] = 0.0
 	for oid in d.get("offers", []):
 		for off in road_offers:
 			if String(off["id"]) == String(oid):
@@ -1818,6 +2447,9 @@ func _restore_save(map_id: String) -> bool:
 			rm["oneWay"] = int(sr["ow"])
 			rm["closed"] = bool(sr["cl"])
 			rm["isBuilt"] = bool(sr["built"])
+			rm["pocketLevel"] = int(sr.get("pk", 0))
+			rm["turnMaskForward"] = int(sr.get("tmf", 7))
+			rm["turnMaskBackward"] = int(sr.get("tmb", 7))
 	for sj in d.get("juncs", []):
 		var jm: Dictionary = junction_map.get(String(sj["id"]), {})
 		if not jm.is_empty():
@@ -1825,15 +2457,19 @@ func _restore_save(map_id: String) -> bool:
 			jm["yieldMinorEdgeIds"] = sj["ym"]
 			if sj["lt"] != null:
 				jm["light"] = sj["lt"]
+				_ensure_light_schema(jm)
 	for sf in d.get("facs", []):
 		var fm: Dictionary = facility_map.get(String(sf["id"]), {})
 		if not fm.is_empty():
 			fm["upgrades"] = sf["up"]
 			fm["outputBuffer"] = int(sf["out"])
+			if sf.has("pile") and typeof(sf["pile"]) == TYPE_ARRAY:
+				fm["yardPile"] = sf["pile"]
 	for srt in d.get("routes", []):
 		var created: Dictionary = create_route(String(srt["from"]), String(srt["to"]), String(srt["good"]), false)
 		if not created.is_empty():
 			created["waypoints"] = srt["wps"]
+			created["sameWayBack"] = bool(srt.get("swb", true))
 			created["truckModel"] = String(srt["model"])
 			recompute_single_route(created)
 			for _k in range(int(srt["cnt"])):

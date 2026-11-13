@@ -1,21 +1,42 @@
 class_name TriBatch2D
 extends RefCounted
 
-## Low-level RenderingServer triangle batcher for zero-overhead 2D/2.5D cartography on Android.
+## Low-level RenderingServer & ArrayMesh triangle batcher for zero-overhead 2D/2.5D cartography on Android.
+## Supports both fast `canvas_item_add_triangle_array` and GPU `CUSTOM0` (`ARRAY_CUSTOM_RGBA_FLOAT`)
+## via `ArrayMesh` for authentic Incremental Traffic shaders (`city_building`, `city_shadow`,
+## `cloud_puff`, and `rule_hints`).
 
 var verts := PackedVector2Array()
 var colors := PackedColorArray()
 var uvs := PackedVector2Array()
+var custom0 := PackedFloat32Array()
 var indices := PackedInt32Array()
+var has_custom0: bool = false
 
 func clear() -> void:
 	verts.clear()
 	colors.clear()
 	uvs.clear()
+	custom0.clear()
 	indices.clear()
+	has_custom0 = false
 
 func is_empty() -> bool:
 	return indices.is_empty()
+
+func _ensure_custom0() -> void:
+	if has_custom0:
+		return
+	has_custom0 = true
+	custom0.resize(verts.size() * 4)
+	custom0.fill(0.0)
+
+func _push_c0(c0: Color) -> void:
+	if has_custom0:
+		custom0.append(c0.r)
+		custom0.append(c0.g)
+		custom0.append(c0.b)
+		custom0.append(c0.a)
 
 func add_tri(a: Vector2, b: Vector2, c: Vector2, col: Color, uv_a := Vector2.ZERO, uv_b := Vector2.ZERO, uv_c := Vector2.ZERO) -> void:
 	var base: int = verts.size()
@@ -28,6 +49,9 @@ func add_tri(a: Vector2, b: Vector2, c: Vector2, col: Color, uv_a := Vector2.ZER
 	uvs.append(uv_a)
 	uvs.append(uv_b)
 	uvs.append(uv_c)
+	if has_custom0:
+		for _i in range(3):
+			_push_c0(Color(0, 0, 0, 0))
 	indices.append(base)
 	indices.append(base + 1)
 	indices.append(base + 2)
@@ -46,6 +70,35 @@ func add_quad(a: Vector2, b: Vector2, c: Vector2, d: Vector2, col: Color, uv_a :
 	uvs.append(uv_b)
 	uvs.append(uv_c)
 	uvs.append(uv_d)
+	if has_custom0:
+		for _i in range(4):
+			_push_c0(Color(0, 0, 0, 0))
+	indices.append(base)
+	indices.append(base + 1)
+	indices.append(base + 2)
+	indices.append(base)
+	indices.append(base + 2)
+	indices.append(base + 3)
+
+func add_quad_c0(a: Vector2, b: Vector2, c: Vector2, d: Vector2, col: Color, uv_a: Vector2, uv_b: Vector2, uv_c: Vector2, uv_d: Vector2, c0_a: Color, c0_b: Color, c0_c: Color, c0_d: Color) -> void:
+	_ensure_custom0()
+	var base: int = verts.size()
+	verts.append(a)
+	verts.append(b)
+	verts.append(c)
+	verts.append(d)
+	colors.append(col)
+	colors.append(col)
+	colors.append(col)
+	colors.append(col)
+	uvs.append(uv_a)
+	uvs.append(uv_b)
+	uvs.append(uv_c)
+	uvs.append(uv_d)
+	_push_c0(c0_a)
+	_push_c0(c0_b)
+	_push_c0(c0_c)
+	_push_c0(c0_d)
 	indices.append(base)
 	indices.append(base + 1)
 	indices.append(base + 2)
@@ -63,11 +116,13 @@ func add_circle(center: Vector2, radius: float, col: Color, segs: int = 16, uv_v
 	verts.append(center)
 	colors.append(col)
 	uvs.append(uv_val)
+	_push_c0(Color(0, 0, 0, 0))
 	for i in range(segs + 1):
 		var a: float = TAU * float(i) / float(segs)
 		verts.append(center + Vector2(cos(a), sin(a)) * radius)
 		colors.append(col)
 		uvs.append(uv_val)
+		_push_c0(Color(0, 0, 0, 0))
 	for i in range(1, segs + 1):
 		indices.append(base)
 		indices.append(base + i)
@@ -91,10 +146,10 @@ func add_polygon_safe(poly: PackedVector2Array, col: Color) -> void:
 			verts.append(p)
 			colors.append(col)
 			uvs.append(Vector2.ZERO)
+			_push_c0(Color(0, 0, 0, 0))
 		for idx in tris:
 			indices.append(base + idx)
 	else:
-		# Fallback centroid fan if GIS ring has a self-touching pinch vertex
 		var c := Vector2.ZERO
 		for p in poly:
 			c += p
@@ -172,6 +227,8 @@ func add_smooth_strip(pts: PackedVector2Array, width: float, col: Color, closed_
 		colors.append(col)
 		uvs.append(Vector2.ZERO)
 		uvs.append(Vector2.ZERO)
+		_push_c0(Color(0, 0, 0, 0))
+		_push_c0(Color(0, 0, 0, 0))
 
 	for i in range(seg_count):
 		var i0: int = base + i * 2
@@ -224,53 +281,154 @@ func add_dashed_polyline(pts: PackedVector2Array, width: float, col: Color, dash
 				s += maxf(0.5, cycle - phase)
 		dist_acc += seg_l
 
-func add_extruded_box_25d(center: Vector2, w: float, d: float, angle: float, height: float, roof_col: Color, wall_col: Color, window_seed: float = 0.0) -> void:
+## Authentic ground shadow quad for `city_shadow.gdshader` (`CUSTOM0 = (reveal_t, center.x, center.y, mode)`)
+func add_city_shadow_25d(center: Vector2, w: float, d: float, angle: float, height: float, shadow_col: Color, reveal_c0 := Color(0.0, 0.0, 0.0, 0.0)) -> void:
 	var ux := Vector2(cos(angle), sin(angle)) * (w * 0.5)
 	var uy := Vector2(-sin(angle), cos(angle)) * (d * 0.5)
 	var b0: Vector2 = center - ux - uy
 	var b1: Vector2 = center + ux - uy
 	var b2: Vector2 = center + ux + uy
 	var b3: Vector2 = center - ux + uy
+	var c0 := Color(reveal_c0.r, center.x, center.y, reveal_c0.a)
+	var uv_base := Vector2(height, 0.0)
+	var uv_cast := Vector2(height, 1.0)
+	var corners: Array[Vector2] = [b0, b1, b2, b3]
+	add_quad_c0(b0, b1, b2, b3, shadow_col, uv_cast, uv_cast, uv_cast, uv_cast, c0, c0, c0, c0)
+	for i in range(4):
+		var ca: Vector2 = corners[i]
+		var cb: Vector2 = corners[(i + 1) % 4]
+		add_quad_c0(ca, cb, cb, ca, shadow_col, uv_base, uv_base, uv_cast, uv_cast, c0, c0, c0, c0)
 
-	# Subtle ground ambient shadow anchored at UV.x = 0.0
-	var sun_off := Vector2(3.2, 4.2) * clampf(height / 16.0, 0.5, 1.8)
-	var shadow_col := Color(0.05, 0.07, 0.10, 0.16)
-	add_quad(b0 + sun_off, b1 + sun_off, b2 + sun_off, b3 + sun_off, shadow_col)
+## Authentic 2.5D building geometry for `city_building.gdshader`:
+## - `UV.x` = height `h`
+## - `UV.y` = `kind * 100.0 + param` (0=roof, 1=wall base, 2=wall top, 4=night window glow)
+## - `CUSTOM0` = `(reveal_time, center.x, center.y, mode)`
+func add_city_building_25d(center: Vector2, w: float, d: float, angle: float, height: float, roof_col: Color, wall_col: Color, window_seed: float = 0.0, reveal_c0 := Color(0.0, 0.0, 0.0, 0.0), shadow_batch: TriBatch2D = null) -> void:
+	var ux := Vector2(cos(angle), sin(angle)) * (w * 0.5)
+	var uy := Vector2(-sin(angle), cos(angle)) * (d * 0.5)
+	var b0: Vector2 = center - ux - uy
+	var b1: Vector2 = center + ux - uy
+	var b2: Vector2 = center + ux + uy
+	var b3: Vector2 = center - ux + uy
+	var c0 := Color(reveal_c0.r, center.x, center.y, reveal_c0.a)
+
+	if shadow_batch != null:
+		shadow_batch.add_city_shadow_25d(center, w, d, angle, height, Color(0.14, 0.16, 0.24, 0.19), reveal_c0)
 
 	var corners: Array[Vector2] = [b0, b1, b2, b3]
-	var sun_dir := Vector2(-0.62, -0.78)
-	var uv_ground := Vector2(0.0, 0.0)
-	var uv_top := Vector2(height, 0.0)
-
-	# Four extruded walls connecting ground UV(0,0) to roof UV(height, 0) with directional sun shading
 	for i in range(4):
 		var c_a: Vector2 = corners[i]
 		var c_b: Vector2 = corners[(i + 1) % 4]
 		var edge_v: Vector2 = (c_b - c_a).normalized()
 		var out_n := Vector2(edge_v.y, -edge_v.x)
-		var lit: float = clampf(0.76 + 0.24 * out_n.dot(sun_dir), 0.56, 1.04)
-		var shaded_wall := Color(wall_col.r * lit, wall_col.g * lit, wall_col.b * lit, wall_col.a)
-		add_quad(c_a, c_b, c_b, c_a, shaded_wall, uv_ground, uv_ground, uv_top, uv_top)
+		var ang_param: float = fposmod(atan2(out_n.y, out_n.x), TAU)
+		var uv_base := Vector2(0.0, 100.0 + ang_param)
+		var uv_top := Vector2(height, 200.0 + ang_param)
+		add_quad_c0(c_a, c_b, c_b, c_a, wall_col, uv_base, uv_base, uv_top, uv_top, c0, c0, c0, c0)
 
-		# Night window band along wider walls
-		if window_seed > 0.05 and c_a.distance_to(c_b) >= 7.5 and height >= 9.0:
-			var p_wa: Vector2 = c_a.lerp(c_b, 0.22)
-			var p_wb: Vector2 = c_a.lerp(c_b, 0.78)
-			var uv_w0 := Vector2(height * 0.35, window_seed)
-			var uv_w1 := Vector2(height * 0.76, window_seed)
-			var win_day := wall_col.darkened(0.24)
-			add_quad(p_wa, p_wb, p_wb, p_wa, win_day, uv_w0, uv_w0, uv_w1, uv_w1)
+	# Extruded roof quad (kind = 0) + crisp architectural inner ridge/lantern
+	var uv_roof := Vector2(height, 0.0)
+	add_quad_c0(b0, b1, b2, b3, roof_col, uv_roof, uv_roof, uv_roof, uv_roof, c0, c0, c0, c0)
+	var in0: Vector2 = center + (b0 - center) * 0.78
+	var in1: Vector2 = center + (b1 - center) * 0.78
+	var in2: Vector2 = center + (b2 - center) * 0.78
+	var in3: Vector2 = center + (b3 - center) * 0.78
+	var uv_peak := Vector2(height * 1.11, 0.0)
+	add_quad_c0(in0, in1, in2, in3, roof_col.lightened(0.11), uv_peak, uv_peak, uv_peak, uv_peak, c0, c0, c0, c0)
 
-	# Extruded roof quad + crisp roof rim highlight
-	add_quad(b0, b1, b2, b3, roof_col, uv_top, uv_top, uv_top, uv_top)
-	var in0: Vector2 = center + (b0 - center) * 0.80
-	var in1: Vector2 = center + (b1 - center) * 0.80
-	var in2: Vector2 = center + (b2 - center) * 0.80
-	var in3: Vector2 = center + (b3 - center) * 0.80
-	var uv_peak := Vector2(height * 1.12, 0.0)
-	add_quad(in0, in1, in2, in3, roof_col.lightened(0.11), uv_peak, uv_peak, uv_peak, uv_peak)
+	# Warm night skylight / window lantern (kind = 4, visible smoothly as night > 0)
+	if window_seed > 0.05 and w >= 7.0 and d >= 7.0:
+		var sk0: Vector2 = center + (b0 - center) * 0.36
+		var sk1: Vector2 = center + (b1 - center) * 0.36
+		var sk2: Vector2 = center + (b2 - center) * 0.36
+		var sk3: Vector2 = center + (b3 - center) * 0.36
+		var intensity: float = clampf(window_seed * 99.0, 15.0, 98.0)
+		var uv_win := Vector2(height * 1.13, 400.0 + intensity)
+		var win_col := Color(1.0, 0.87, 0.54, 0.92)
+		add_quad_c0(sk0, sk1, sk2, sk3, win_col, uv_win, uv_win, uv_win, uv_win, c0, c0, c0, c0)
+
+## Legacy wrapper mapped directly to `add_city_building_25d`
+func add_extruded_box_25d(center: Vector2, w: float, d: float, angle: float, height: float, roof_col: Color, wall_col: Color, window_seed: float = 0.0, reveal_c0 := Color(0.0, 0.0, 0.0, 0.0), shadow_batch: TriBatch2D = null) -> void:
+	add_city_building_25d(center, w, d, angle, height, roof_col, wall_col, window_seed, reveal_c0, shadow_batch)
+
+## Authentic drifting cloud puff quad for `cloud_puff.gdshader`
+func add_cloud_puff(center: Vector2, radius: float, phase: float, gust_phase: float, col: Color) -> void:
+	var r_vec := Vector2(radius, radius)
+	var a := center + Vector2(-r_vec.x, -r_vec.y)
+	var b := center + Vector2(r_vec.x, -r_vec.y)
+	var c := center + Vector2(r_vec.x, r_vec.y)
+	var d := center + Vector2(-r_vec.x, r_vec.y)
+	var c0 := Color(radius, phase, gust_phase, 0.0)
+	add_quad_c0(a, b, c, d, col, Vector2(-1.0, -1.0), Vector2(1.0, -1.0), Vector2(1.0, 1.0), Vector2(-1.0, 1.0), c0, c0, c0, c0)
+
+## Authentic `rule_hints.gdshader` primitives (KIND_DOT=0, KIND_RING=1, KIND_SIGN_RING=2, KIND_DASH=3)
+func add_rule_hint_dot(center: Vector2, group_id: float = 0.0) -> void:
+	var c0 := Color(0.0, 0.0, group_id, 0.0)
+	add_quad_c0(center, center, center, center, Color.WHITE, Vector2(-1.0, -1.0), Vector2(1.0, -1.0), Vector2(1.0, 1.0), Vector2(-1.0, 1.0), c0, c0, c0, c0)
+
+func add_rule_hint_ring(center: Vector2, world_radius: float, segs: int = 28, group_id: float = 0.0) -> void:
+	var c0_in := Color(1.0, -1.0, group_id, 0.0)
+	var c0_out := Color(1.0, 1.0, group_id, 0.0)
+	for i in range(segs):
+		var a0: float = TAU * float(i) / float(segs)
+		var a1: float = TAU * float(i + 1) / float(segs)
+		add_quad_c0(center, center, center, center, Color.WHITE, Vector2(a0, world_radius), Vector2(a0, world_radius), Vector2(a1, world_radius), Vector2(a1, world_radius), c0_in, c0_out, c0_out, c0_in)
+
+func add_rule_hint_sign_ring(center: Vector2, segs: int = 24, group_id: float = 0.0) -> void:
+	var c0_in := Color(2.0, -1.0, group_id, 0.0)
+	var c0_out := Color(2.0, 1.0, group_id, 0.0)
+	for i in range(segs):
+		var a0: float = TAU * float(i) / float(segs)
+		var a1: float = TAU * float(i + 1) / float(segs)
+		add_quad_c0(center, center, center, center, Color.WHITE, Vector2(a0, 0.0), Vector2(a0, 0.0), Vector2(a1, 0.0), Vector2(a1, 0.0), c0_in, c0_out, c0_out, c0_in)
+
+func add_rule_hint_dash_polyline(pts: PackedVector2Array, group_id: float = 0.0) -> void:
+	if pts.size() < 2:
+		return
+	var c0_l := Color(3.0, -1.0, group_id, 0.0)
+	var c0_r := Color(3.0, 1.0, group_id, 0.0)
+	var dist_acc: float = 0.0
+	for i in range(pts.size() - 1):
+		var a: Vector2 = pts[i]
+		var b: Vector2 = pts[i + 1]
+		var seg_l: float = a.distance_to(b)
+		if seg_l < 0.2:
+			continue
+		var dir: Vector2 = (b - a) / seg_l
+		var n_ang: float = atan2(dir.x, -dir.y)
+		var d0: float = dist_acc
+		var d1: float = dist_acc + seg_l
+		add_quad_c0(a, a, b, b, Color.WHITE, Vector2(d0, n_ang), Vector2(d0, n_ang), Vector2(d1, n_ang), Vector2(d1, n_ang), c0_l, c0_r, c0_r, c0_l)
+		dist_acc = d1
 
 func commit_to_canvas_item(ci: RID) -> void:
 	RenderingServer.canvas_item_clear(ci)
 	if not indices.is_empty():
 		RenderingServer.canvas_item_add_triangle_array(ci, indices, verts, colors, uvs)
+
+func upload_to_mesh(mesh: ArrayMesh) -> void:
+	if mesh == null:
+		return
+	mesh.clear_surfaces()
+	if indices.is_empty():
+		return
+	var arrays := []
+	arrays.resize(Mesh.ARRAY_MAX)
+	arrays[Mesh.ARRAY_VERTEX] = verts
+	arrays[Mesh.ARRAY_COLOR] = colors
+	arrays[Mesh.ARRAY_TEX_UV] = uvs
+	arrays[Mesh.ARRAY_INDEX] = indices
+	var flags: int = 0
+	if has_custom0 and custom0.size() == verts.size() * 4:
+		arrays[Mesh.ARRAY_CUSTOM0] = custom0
+		flags = Mesh.ARRAY_CUSTOM_RGBA_FLOAT << Mesh.ARRAY_FORMAT_CUSTOM0_SHIFT
+	mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays, [], {}, flags)
+
+func commit_mesh_to_canvas_item(ci: RID, mesh: ArrayMesh) -> void:
+	RenderingServer.canvas_item_clear(ci)
+	if mesh == null:
+		return
+	upload_to_mesh(mesh)
+	if mesh.get_surface_count() > 0:
+		RenderingServer.canvas_item_add_mesh(ci, mesh.get_rid())
+

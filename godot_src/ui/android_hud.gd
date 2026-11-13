@@ -12,6 +12,9 @@ signal overlay_changed(mode_id: String)
 signal map_selected(map_id: String)
 signal perf_preset_changed(preset_id: String)
 signal theme_toggled(is_dark: bool)
+signal hide_flyovers_toggled(on: bool)
+signal colorblind_toggled(on: bool)
+signal cloud_shadows_toggled(on: bool)
 signal focus_world_requested(world_pos: Vector2)
 
 var sim: SimEngine
@@ -19,7 +22,8 @@ var map_view: MapView25D
 
 var dark_mode: bool = false
 var perf_preset: String = "balanced"
-var current_drawer: String = "" # "", "facility", "junction", "road", "routes", "trucks", "offers", "goals", "maps", "overlays", "settings"
+var lane_dir_mode: String = "both" # "both", "forward", "backward"
+var current_drawer: String = "" # "", "facility", "junction", "road", "routes", "trucks", "alerts", "offers", "goals", "maps", "overlays", "settings"
 
 var _theme_light: Theme
 var _theme_dark: Theme
@@ -52,6 +56,7 @@ var _rule_vbox: VBoxContainer
 var _tool_btns: Dictionary = {}
 var _lane_subbar: PanelContainer
 var _lane_sub_btns: Dictionary = {}
+var _lane_dir_btn: Button
 
 # Zone 4: Bottom-Left PrimaryButtons (Overview & Trucks)
 var _bottom_left_row: HBoxContainer
@@ -93,8 +98,9 @@ var _inspector_body: VBoxContainer
 var _fac_show_incoming: bool = false
 var _fac_swap_route_id: String = ""
 var _fac_swap_target_model: String = "freighter"
+var _selected_light_phase: int = 0
 
-# Centered Wide Modal (Overview / Trucks / Maps / Settings)
+# Centered Wide Modal (Overview / Trucks / Alerts / Maps / Settings)
 var _modal_panel: PanelContainer
 var _modal_title: Label
 var _modal_summary: Label
@@ -102,6 +108,7 @@ var _modal_graph: _CashGraphWidget
 var _modal_tabs: TabContainer
 var _tab_routes_vbox: VBoxContainer
 var _tab_trucks_vbox: VBoxContainer
+var _tab_alerts_vbox: VBoxContainer
 var _tab_maps_vbox: VBoxContainer
 var _tab_opts_vbox: VBoxContainer
 var _overview_swap_route_id: String = ""
@@ -114,6 +121,14 @@ var _banner_timer: float = 0.0
 var _ui_refresh_timer: float = 0.0
 var _last_win_size := Vector2i.ZERO
 var _last_vp_size := Vector2.ZERO
+
+func _exit_tree() -> void:
+	if _root != null and is_instance_valid(_root):
+		_root.theme = null
+	_theme_light = null
+	_theme_dark = null
+	_logo_tex = null
+	_ui_font = null
 
 func setup(sim_engine: SimEngine, view_node: MapView25D) -> void:
 	layer = 15
@@ -285,10 +300,10 @@ func _build_shell() -> void:
 
 	var rule_specs := [
 		["yield", "Yield"],
-		["close_street", "Stop"],
-		["lanes_add", "Lanes"],
 		["roundabout", "Roundabout"],
 		["lights", "Lights"],
+		["lanes_add", "Lanes"],
+		["one_way", "One-way"],
 		["offers_ui", "Roads"],
 	]
 	for spec in rule_specs:
@@ -320,7 +335,13 @@ func _build_shell() -> void:
 	lsub_row.add_theme_constant_override("separation", 3)
 	_lane_subbar.add_child(lsub_row)
 
-	for lspec in [["lanes_add", "+ Add lane"], ["lanes_remove", "− Remove lane"], ["one_way", "One-way"], ["close_street", "Close street"]]:
+	for lspec in [
+		["lanes_add", "+ Lane"],
+		["lanes_remove", "− Lane"],
+		["pocket", "Pocket"],
+		["turn_arrows", "Arrows"],
+		["close_street", "Close"]
+	]:
 		var lid := String(lspec[0])
 		var sb := Button.new()
 		sb.theme_type_variation = &"SegmentButton"
@@ -335,6 +356,24 @@ func _build_shell() -> void:
 		)
 		_lane_sub_btns[lid] = sb
 		lsub_row.add_child(sb)
+
+	_lane_dir_btn = Button.new()
+	_lane_dir_btn.theme_type_variation = &"SegmentButton"
+	_lane_dir_btn.focus_mode = Control.FOCUS_NONE
+	_lane_dir_btn.text = "Dir: Both"
+	_lane_dir_btn.custom_minimum_size = Vector2(0, 36)
+	_lane_dir_btn.pressed.connect(func():
+		if lane_dir_mode == "both":
+			lane_dir_mode = "forward"
+			_lane_dir_btn.text = "Dir: Fwd"
+		elif lane_dir_mode == "forward":
+			lane_dir_mode = "backward"
+			_lane_dir_btn.text = "Dir: Back"
+		else:
+			lane_dir_mode = "both"
+			_lane_dir_btn.text = "Dir: Both"
+	)
+	lsub_row.add_child(_lane_dir_btn)
 
 	# === ZONE 4: BOTTOM-LEFT PRIMARY BUTTONS (Overview & Trucks) ===
 	_bottom_left_row = HBoxContainer.new()
@@ -456,7 +495,8 @@ func _build_shell() -> void:
 	_bell_btn.custom_minimum_size = Vector2(44, 46)
 	_bell_btn.pressed.connect(func():
 		if _bell_icon.has_alert:
-			_jump_broken_route()
+			if not _jump_broken_route():
+				open_drawer("alerts")
 		elif current_drawer == "settings":
 			close_drawer()
 		else:
@@ -637,18 +677,16 @@ func _build_shell() -> void:
 
 	_modal_title = Label.new()
 	_modal_title.theme_type_variation = &"HeaderLabel"
-	_modal_title.clip_text = true
-	_modal_title.text_overrun_behavior = TextServer.OVERRUN_TRIM_ELLIPSIS
-	_modal_title.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	_modal_title.text = "Overview"
 	mod_head.add_child(_modal_title)
 
 	_modal_summary = Label.new()
 	_modal_summary.theme_type_variation = &"MonoLabel"
+	_modal_summary.add_theme_font_size_override("font_size", 14)
 	_modal_summary.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	_modal_summary.size_flags_stretch_ratio = 2.2
-	_modal_summary.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	_modal_summary.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
 	_modal_summary.clip_text = true
+	_modal_summary.text_overrun_behavior = TextServer.OVERRUN_TRIM_ELLIPSIS
 	mod_head.add_child(_modal_summary)
 
 	var mod_close := Button.new()
@@ -670,6 +708,7 @@ func _build_shell() -> void:
 
 	_tab_routes_vbox = _make_tab_scroll("Routes")
 	_tab_trucks_vbox = _make_tab_scroll("Trucks")
+	_tab_alerts_vbox = _make_tab_scroll("Alerts")
 	_tab_maps_vbox = _make_tab_scroll("Maps (7)")
 	_tab_opts_vbox = _make_tab_scroll("Options")
 
@@ -679,8 +718,10 @@ func _build_shell() -> void:
 		elif idx == 1:
 			current_drawer = "trucks"
 		elif idx == 2:
-			current_drawer = "maps"
+			current_drawer = "alerts"
 		elif idx == 3:
+			current_drawer = "maps"
+		elif idx == 4:
 			current_drawer = "settings"
 		_populate_modal_tabs()
 	)
@@ -963,15 +1004,14 @@ func refresh_top_bar() -> void:
 	_clock_icon.queue_redraw()
 	_day_run_chk.set_pressed_no_signal(sim.auto_day_night)
 
-	# Broken route alert indicator on Bell button
-	var has_broken: bool = false
-	for rt in sim.routes:
-		if String(rt["brokenReason"]) != "":
-			has_broken = true
-			break
-	if _bell_icon.has_alert != has_broken:
-		_bell_icon.has_alert = has_broken
+	# System alerts indicator on Bell button & Overview Alerts tab badge
+	var sys_alerts: Array[Dictionary] = sim.get_system_alerts()
+	var has_alert_now: bool = not sys_alerts.is_empty()
+	if _bell_icon.has_alert != has_alert_now:
+		_bell_icon.has_alert = has_alert_now
 		_bell_icon.queue_redraw()
+	if _modal_tabs != null and _modal_tabs.get_tab_count() >= 3:
+		_modal_tabs.set_tab_title(2, ("Alerts (%d)" % sys_alerts.size()) if has_alert_now else "Alerts")
 
 	_route_hint_pill.visible = (map_view != null and map_view.active_tool == "route")
 	if _route_hint_pill.visible:
@@ -1093,18 +1133,19 @@ func _sync_overlay_bar() -> void:
 	_overlay_card_title.text = String(titles.get(cur, "Overlay"))
 	_overlay_card_desc.text = String(descs.get(cur, ""))
 
+	var cb: bool = map_view.colorblind_mode if map_view != null else false
 	if cur == "traffic":
-		_overlay_card_body.add_child(_make_legend_chip(Color("4FB35E"), "Flowing smoothly"))
-		_overlay_card_body.add_child(_make_legend_chip(Color("F2C230"), "Slow / queuing"))
-		_overlay_card_body.add_child(_make_legend_chip(Color("C8323A"), "Jammed"))
+		_overlay_card_body.add_child(_make_legend_chip(GameCatalog.traffic_band_color(0.0, cb, 1.0), "Flowing smoothly"))
+		_overlay_card_body.add_child(_make_legend_chip(GameCatalog.traffic_band_color(0.5, cb, 1.0), "Slow / queuing"))
+		_overlay_card_body.add_child(_make_legend_chip(GameCatalog.traffic_band_color(1.0, cb, 1.0), "Jammed"))
 	elif cur == "buildings":
-		_overlay_card_body.add_child(_make_legend_chip(Color("3E9E50"), "Working"))
-		_overlay_card_body.add_child(_make_legend_chip(Color("E09A2A"), "Waiting for input"))
-		_overlay_card_body.add_child(_make_legend_chip(Color("D0393F"), "Output storage full"))
+		_overlay_card_body.add_child(_make_legend_chip(GameCatalog.status_color("good", cb), "Working"))
+		_overlay_card_body.add_child(_make_legend_chip(GameCatalog.status_color("warn", cb), "Waiting for input"))
+		_overlay_card_body.add_child(_make_legend_chip(GameCatalog.status_color("bad", cb), "Output storage full"))
 	elif cur == "demand":
-		_overlay_card_body.add_child(_make_legend_chip(Color("3E9E50"), "Goal met"))
-		_overlay_card_body.add_child(_make_legend_chip(Color("E09A2A"), "Halfway there"))
-		_overlay_card_body.add_child(_make_legend_chip(Color("D0393F"), "Below target"))
+		_overlay_card_body.add_child(_make_legend_chip(GameCatalog.status_color("good", cb), "Goal met"))
+		_overlay_card_body.add_child(_make_legend_chip(GameCatalog.status_color("warn", cb), "Halfway there"))
+		_overlay_card_body.add_child(_make_legend_chip(GameCatalog.status_color("bad", cb), "Below target"))
 	elif cur == "routes":
 		for i in range(mini(6, sim.routes.size())):
 			var rt: Dictionary = sim.routes[i]
@@ -1157,7 +1198,7 @@ func _on_rule_card_tapped(tid: String) -> void:
 		return
 
 	var cur := map_view.active_tool
-	var is_lane_group: bool = tid == "lanes_add" and cur in ["lanes_add", "lanes_remove", "one_way"]
+	var is_lane_group: bool = tid == "lanes_add" and cur in ["lanes_add", "lanes_remove", "pocket", "turn_arrows", "close_street"]
 	if cur == tid or is_lane_group:
 		if sim.sfx:
 			sim.sfx.play_ui("tool_deselect")
@@ -1193,7 +1234,7 @@ func _sync_tool_highlights() -> void:
 	if map_view == null:
 		return
 	var cur := map_view.active_tool
-	var lane_active: bool = cur in ["lanes_add", "lanes_remove", "one_way"]
+	var lane_active: bool = cur in ["lanes_add", "lanes_remove", "pocket", "turn_arrows", "close_street"]
 	for k in _tool_btns.keys():
 		var tb: Button = _tool_btns[k]
 		if k == "lanes_add":
@@ -1208,7 +1249,7 @@ func _sync_tool_highlights() -> void:
 	for lk in _lane_sub_btns.keys():
 		(_lane_sub_btns[lk] as Button).set_pressed_no_signal(cur == String(lk))
 
-func _jump_broken_route() -> void:
+func _jump_broken_route() -> bool:
 	for rt in sim.routes:
 		if String(rt["brokenReason"]) != "":
 			var f_from: Dictionary = sim.facility_map.get(String(rt["fromFacilityId"]), {})
@@ -1217,7 +1258,8 @@ func _jump_broken_route() -> void:
 			map_view.selected_route_id = String(rt["id"])
 			open_drawer("routes")
 			show_toast_banner("Broken route: " + String(rt["brokenReason"]), 3.2)
-			return
+			return true
+	return false
 
 # === DRAWER & MODAL ROUTING ===
 
@@ -1226,17 +1268,19 @@ func open_drawer(kind: String) -> void:
 	current_drawer = kind
 	_day_popover.visible = false
 
-	if kind in ["routes", "trucks", "maps", "settings"]:
+	if kind in ["routes", "trucks", "alerts", "maps", "settings"]:
 		_inspector_panel.visible = false
 		_banner_panel.visible = false
 		_modal_panel.visible = true
 		var tab_idx: int = 0
 		if kind == "trucks":
 			tab_idx = 1
-		elif kind == "maps":
+		elif kind == "alerts":
 			tab_idx = 2
-		elif kind == "settings":
+		elif kind == "maps":
 			tab_idx = 3
+		elif kind == "settings":
+			tab_idx = 4
 		_modal_tabs.current_tab = tab_idx
 		_refresh_modal_header_and_graph()
 		_populate_modal_tabs()
@@ -1261,7 +1305,7 @@ func close_drawer() -> void:
 	_layout_responsive()
 
 func _populate_drawer() -> void:
-	if current_drawer in ["routes", "trucks", "maps", "settings"]:
+	if current_drawer in ["routes", "trucks", "alerts", "maps", "settings"]:
 		_refresh_modal_header_and_graph()
 		_populate_modal_tabs()
 		return
@@ -1284,6 +1328,10 @@ func _populate_drawer() -> void:
 # === 1. AUTHENTIC FACTORY PANEL (matching game_trucks.webp!) ===
 
 var _live_fac_ring: _FactoryFlowRingWidget = null
+var _live_hub_veh_lbl: Label = null
+var _live_hub_veh_bar: ProgressBar = null
+var _live_hub_yard_lbl: Label = null
+var _live_hub_yard_bar: ProgressBar = null
 
 func _build_authentic_factory_panel() -> void:
 	var fid := map_view.selected_facility_id
@@ -1295,7 +1343,7 @@ func _build_authentic_factory_panel() -> void:
 
 	_inspector_title.text = String(f["name"])
 
-	# Status Pill (• Running / • Waiting / • Output full)
+	# Status Pill (• Running / • Waiting / • Output full / • Yard full)
 	_inspector_status_pill.visible = true
 	var stalled := String(f["stalledReason"])
 	var pill_sb := StyleBoxFlat.new()
@@ -1306,7 +1354,7 @@ func _build_authentic_factory_panel() -> void:
 	pill_sb.content_margin_bottom = 2.0
 	if stalled == "output_full":
 		pill_sb.bg_color = Color(0.76, 0.25, 0.18, 0.16)
-		_inspector_status_lbl.text = "• Output full"
+		_inspector_status_lbl.text = "• Yard full" if kind_s in ["station", "harbour"] else "• Output full"
 		_inspector_status_lbl.add_theme_color_override("font_color", _status_col(&"bad", Color("C2412F")))
 	elif stalled == "missing_input":
 		pill_sb.bg_color = Color(0.88, 0.60, 0.16, 0.20)
@@ -1318,7 +1366,7 @@ func _build_authentic_factory_panel() -> void:
 		_inspector_status_lbl.add_theme_color_override("font_color", _status_col(&"good", Color("2C7442")))
 	_inspector_status_pill.add_theme_stylebox_override("panel", pill_sb)
 
-	# Subtitle recipe + Madiun heritage note
+	# Subtitle recipe + authentic Press/Cut/Assembly title + Madiun heritage note
 	var recipe_s := String(f["localContext"])
 	if f["outputGood"] != null:
 		var out_g := String(f["outputGood"])
@@ -1329,16 +1377,82 @@ func _build_authentic_factory_panel() -> void:
 			var in_parts: Array[String] = []
 			for inp in gdef["inputs"]:
 				in_parts.append("%d %s" % [int(inp["qty"]), String(GameCatalog.GOODS[String(inp["good"])]["name"])])
-			recipe_s = "%s → %s (%s)" % [" + ".join(in_parts), String(gdef["name"]), String(gdef["local"])]
+			recipe_s = "%s · %s → %s (%s)" % [GameCatalog.factory_title_for(out_g), " + ".join(in_parts), String(gdef["name"]), String(gdef["local"])]
 	_inspector_sub.text = recipe_s
 
-	# Custom In -> Circular Ring -> Out Widget (matching _y0ar3x8pESeh in factory_panel.gd!)
+	# Custom In -> Circular Ring -> Out Widget OR Station/Harbour Yard Storage Card!
 	_live_fac_ring = null
+	_live_hub_veh_lbl = null
+	_live_hub_veh_bar = null
+	_live_hub_yard_lbl = null
+	_live_hub_yard_bar = null
+
 	if f["outputGood"] != null:
 		var ring_w := _FactoryFlowRingWidget.new()
 		ring_w.font_ref = _ui_font
 		_live_fac_ring = ring_w
 		_inspector_body.add_child(ring_w)
+		_update_facility_live_widgets()
+	elif kind_s in ["station", "harbour"]:
+		var hub_card := PanelContainer.new()
+		hub_card.theme_type_variation = &"CardPanel"
+		var hcol := VBoxContainer.new()
+		hcol.add_theme_constant_override("separation", 6)
+		hub_card.add_child(hcol)
+
+		var veh_lbl := Label.new()
+		veh_lbl.theme_type_variation = &"MonoLabel"
+		_live_hub_veh_lbl = veh_lbl
+		hcol.add_child(veh_lbl)
+
+		var veh_bar := ProgressBar.new()
+		veh_bar.show_percentage = false
+		veh_bar.custom_minimum_size = Vector2(0, 8)
+		_live_hub_veh_bar = veh_bar
+		hcol.add_child(veh_bar)
+
+		var yard_lbl := Label.new()
+		yard_lbl.theme_type_variation = &"MonoLabel"
+		_live_hub_yard_lbl = yard_lbl
+		hcol.add_child(yard_lbl)
+
+		var yard_bar := ProgressBar.new()
+		yard_bar.show_percentage = false
+		yard_bar.custom_minimum_size = Vector2(0, 8)
+		_live_hub_yard_bar = yard_bar
+		hcol.add_child(yard_bar)
+
+		var pile_arr: Array = f.get("yardPile", [])
+		if not pile_arr.is_empty():
+			var prow := HBoxContainer.new()
+			prow.add_theme_constant_override("separation", 4)
+			var pcap := Label.new()
+			pcap.theme_type_variation = &"CaptionLabel"
+			pcap.text = "Yard pile:"
+			prow.add_child(pcap)
+			for pi in range(mini(10, pile_arr.size())):
+				var pgid := String(pile_arr[pi])
+				if GameCatalog.GOODS.has(pgid):
+					var pgw := _GoodGlyphWidget.new()
+					pgw.good_id = pgid
+					pgw.custom_minimum_size = Vector2(16, 16)
+					prow.add_child(pgw)
+			if pile_arr.size() > 10:
+				var pmore := Label.new()
+				pmore.theme_type_variation = &"CaptionLabel"
+				pmore.text = "+%d" % (pile_arr.size() - 10)
+				prow.add_child(pmore)
+			hcol.add_child(prow)
+
+		var hnote := Label.new()
+		hnote.theme_type_variation = &"CaptionLabel"
+		hnote.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+		hnote.text = "On-site yard stores cargo while %s is away (%s× capacity) and loads continuously on arrival." % [
+			"train" if kind_s == "station" else "ship",
+			"2.0" if kind_s == "station" else "1.6"
+		]
+		hcol.add_child(hnote)
+		_inspector_body.add_child(hub_card)
 		_update_facility_live_widgets()
 	else:
 		var hub_card := PanelContainer.new()
@@ -1556,15 +1670,18 @@ func _build_route_card_for_factory(rt: Dictionary, is_incoming: bool) -> PanelCo
 	cnt_top.text = "× %d" % cnt
 	r1.add_child(cnt_top)
 
-	# Row 2: [-]  N × [Model Swap Pill ▾]  [+ $price PrimaryButton]
+	# Row 2: [- (+refund)]  N × [Model Swap Pill ▾]  [+ $price PrimaryButton]
 	var r2 := HBoxContainer.new()
 	r2.add_theme_constant_override("separation", 6)
 	rcol.add_child(r2)
 
+	var owned_m: int = sim.get_owned_count_by_model(m_id)
+	var resale_p: int = GameCatalog.compute_truck_resale_price(m_id, owned_m, sim.agents.size()) if cnt > 0 else 0
 	var minus_b := Button.new()
 	minus_b.theme_type_variation = &"ToolButton"
 	minus_b.focus_mode = Control.FOCUS_NONE
 	minus_b.text = "−"
+	minus_b.tooltip_text = ("Sell 1 truck (+" + GameCatalog.fmt_cash(resale_p) + ")") if cnt > 0 else "No trucks"
 	minus_b.custom_minimum_size = Vector2(34, 34)
 	minus_b.disabled = (cnt <= 0)
 	minus_b.set_meta(&"sfx", "sell")
@@ -1655,17 +1772,41 @@ func _build_route_card_for_factory(rt: Dictionary, is_incoming: bool) -> PanelCo
 			quote_row.add_child(exec_swap)
 			rcol.add_child(quote_row)
 
-	# Bottom quick actions: Edit path / Waypoints & Retire
+	# Bottom quick actions: Edit path / Waypoints, Same way back, Clear WP & Retire
 	var r3 := HBoxContainer.new()
+	r3.add_theme_constant_override("separation", 4)
+	var wp_cnt: int = (rt["waypoints"] as Array).size()
 	var wp_btn := Button.new()
 	wp_btn.theme_type_variation = &"QuietButton"
 	wp_btn.focus_mode = Control.FOCUS_NONE
-	wp_btn.text = "Edit path (%d WP)" % (rt["waypoints"] as Array).size()
+	wp_btn.text = "Path (%d WP)" % wp_cnt
 	wp_btn.pressed.connect(func():
 		map_view.selected_route_id = rtid
+		open_drawer("routes")
 		show_toast_banner("Route highlighted! Tap any road junction to add/remove a waypoint.", 3.0)
 	)
 	r3.add_child(wp_btn)
+
+	if wp_cnt > 0:
+		var clr_wp := Button.new()
+		clr_wp.theme_type_variation = &"QuietButton"
+		clr_wp.focus_mode = Control.FOCUS_NONE
+		clr_wp.text = "Clear WP"
+		clr_wp.pressed.connect(func():
+			sim.clear_route_waypoints(rtid)
+			_populate_drawer()
+		)
+		r3.add_child(clr_wp)
+
+	var swb_chk := CheckBox.new()
+	swb_chk.focus_mode = Control.FOCUS_NONE
+	swb_chk.text = "Same back"
+	swb_chk.set_pressed_no_signal(bool(rt.get("sameWayBack", true)))
+	swb_chk.toggled.connect(func(on: bool):
+		sim.set_route_same_way_back(rtid, on)
+		_populate_drawer()
+	)
+	r3.add_child(swb_chk)
 
 	var spc := Control.new()
 	spc.size_flags_horizontal = Control.SIZE_EXPAND_FILL
@@ -1687,18 +1828,35 @@ func _build_route_card_for_factory(rt: Dictionary, is_incoming: bool) -> PanelCo
 	return rcard
 
 func _update_facility_live_widgets() -> void:
-	if _live_fac_ring == null or not is_instance_valid(_live_fac_ring):
-		return
 	var fid := map_view.selected_facility_id
 	if not sim.facility_map.has(fid):
 		return
 	var f: Dictionary = sim.facility_map[fid]
-	if f["outputGood"] == null:
+	var kind_s := String(f["kind"])
+
+	if kind_s in ["station", "harbour"] and _live_hub_veh_lbl != null and is_instance_valid(_live_hub_veh_lbl):
+		var v_nm := "Train" if kind_s == "station" else "Ship"
+		var v_cap: int = maxi(1, sim.get_hub_vehicle_capacity_slots(f))
+		var v_cur: int = int(f.get("vehicleLoaded", 0))
+		var docked: bool = bool(f.get("vehiclePresent", true))
+		var timer_s: float = float(f.get("vehicleTimer", 0.0))
+		_live_hub_veh_lbl.text = ("%s docked: %d / %d slots (departs %ds)" % [v_nm, v_cur, v_cap, int(ceil(timer_s))]) if docked else ("%s away: arrives in %ds" % [v_nm, int(ceil(timer_s))])
+		_live_hub_veh_bar.max_value = float(v_cap)
+		_live_hub_veh_bar.value = float(v_cur if docked else 0)
+
+		var y_cap: int = maxi(1, sim.get_hub_yard_capacity_slots(f))
+		var y_used: int = sim.get_hub_yard_used_slots(f)
+		_live_hub_yard_lbl.text = "On-site yard storage: %d / %d slots" % [y_used, y_cap]
+		_live_hub_yard_bar.max_value = float(y_cap)
+		_live_hub_yard_bar.value = float(y_used)
+		return
+
+	if _live_fac_ring == null or not is_instance_valid(_live_fac_ring) or f["outputGood"] == null:
 		return
 	var out_g := String(f["outputGood"])
 	var gdef: Dictionary = GameCatalog.GOODS[out_g]
 	var cap: int = sim.get_capacity_slots(f)
-	_live_fac_ring.is_source = (String(f["kind"]) == "supplier")
+	_live_fac_ring.is_source = (kind_s == "supplier")
 	_live_fac_ring.out_good = out_g
 	_live_fac_ring.out_count = int(f["outputBuffer"])
 	_live_fac_ring.out_cap = cap
@@ -1754,8 +1912,24 @@ func _build_authentic_junction_panel() -> void:
 		)
 		row.add_child(b)
 
+	if String(j["control"]) == "yield":
+		var rot_b := Button.new()
+		rot_b.theme_type_variation = &"PrimaryButton"
+		rot_b.focus_mode = Control.FOCUS_NONE
+		rot_b.custom_minimum_size = Vector2(0, 38)
+		rot_b.text = "↻ Rotate main priority road ($0)"
+		rot_b.pressed.connect(func():
+			show_toast_banner(sim.rotate_yield_priority(jid))
+			_populate_drawer()
+		)
+		_inspector_body.add_child(rot_b)
+
 	if String(j["control"]) == "lights" and j.has("light"):
+		sim._ensure_light_schema(j)
 		var lt: Dictionary = j["light"]
+		var phases: Array = lt["phases"]
+		_selected_light_phase = clampi(_selected_light_phase, 0, maxi(0, phases.size() - 1))
+
 		var lcard := PanelContainer.new()
 		lcard.theme_type_variation = &"CardPanel"
 		var lcol := VBoxContainer.new()
@@ -1764,43 +1938,137 @@ func _build_authentic_junction_panel() -> void:
 
 		var badge := Label.new()
 		badge.theme_type_variation = &"SectionLabel"
-		badge.text = "Traffic light timing"
+		badge.text = "Multi-phase signal controller (%d phases)" % phases.size()
 		lcol.add_child(badge)
 
-		var la := Label.new()
-		la.text = "Phase A green: %d s" % int(lt["phaseAGreen"])
-		lcol.add_child(la)
-		var sa := HSlider.new()
-		sa.min_value = 4.0
-		sa.max_value = 40.0
-		sa.step = 1.0
-		sa.value = float(lt["phaseAGreen"])
-		sa.value_changed.connect(func(v: float):
-			lt["phaseAGreen"] = v
-			la.text = "Phase A green: %d s" % int(v)
-		)
-		lcol.add_child(sa)
+		# Phase selector tabs + Add/Remove phase buttons
+		var ph_row := HBoxContainer.new()
+		ph_row.add_theme_constant_override("separation", 4)
+		var ph_names := ["A", "B", "C", "D"]
+		for pi in range(phases.size()):
+			var p_idx: int = pi
+			var pb := Button.new()
+			pb.theme_type_variation = &"SegmentButton"
+			pb.toggle_mode = true
+			pb.focus_mode = Control.FOCUS_NONE
+			pb.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+			pb.text = "Phase %s (%ds)" % [ph_names[pi], int(round(float(phases[pi]["green"])))]
+			pb.set_pressed_no_signal(_selected_light_phase == pi)
+			pb.pressed.connect(func():
+				_selected_light_phase = p_idx
+				_populate_drawer()
+			)
+			ph_row.add_child(pb)
 
-		var lb := Label.new()
-		lb.text = "Phase B green: %d s" % int(lt["phaseBGreen"])
-		lcol.add_child(lb)
-		var sb := HSlider.new()
-		sb.min_value = 4.0
-		sb.max_value = 40.0
-		sb.step = 1.0
-		sb.value = float(lt["phaseBGreen"])
-		sb.value_changed.connect(func(v: float):
-			lt["phaseBGreen"] = v
-			lb.text = "Phase B green: %d s" % int(v)
+		if phases.size() < 4:
+			var add_ph := Button.new()
+			add_ph.theme_type_variation = &"ToolButton"
+			add_ph.focus_mode = Control.FOCUS_NONE
+			add_ph.text = "+ Ph"
+			add_ph.pressed.connect(func():
+				if sim.add_light_phase(jid):
+					_selected_light_phase = phases.size() - 1
+					_populate_drawer()
+			)
+			ph_row.add_child(add_ph)
+
+		if phases.size() > 2:
+			var rem_ph := Button.new()
+			rem_ph.theme_type_variation = &"ToolButton"
+			rem_ph.focus_mode = Control.FOCUS_NONE
+			rem_ph.text = "− Ph"
+			rem_ph.pressed.connect(func():
+				if sim.remove_light_phase(jid, _selected_light_phase):
+					_selected_light_phase = clampi(_selected_light_phase, 0, phases.size() - 1)
+					_populate_drawer()
+			)
+			ph_row.add_child(rem_ph)
+		lcol.add_child(ph_row)
+
+		# Selected phase Green duration slider
+		var cur_ph: Dictionary = phases[_selected_light_phase]
+		var ph_lbl_name: String = ph_names[_selected_light_phase]
+		var lg := Label.new()
+		lg.text = "Phase %s green duration: %d s" % [ph_lbl_name, int(round(float(cur_ph["green"])))]
+		lcol.add_child(lg)
+		var sg := HSlider.new()
+		sg.min_value = 3.0
+		sg.max_value = 60.0
+		sg.step = 1.0
+		sg.value = float(cur_ph["green"])
+		sg.value_changed.connect(func(v: float):
+			sim.set_light_phase_green(jid, _selected_light_phase, v)
+			lg.text = "Phase %s green duration: %d s" % [ph_lbl_name, int(round(v))]
 		)
-		lcol.add_child(sb)
+		lcol.add_child(sg)
+
+		# Per-arm turn-head matrix for selected phase
+		var arms_cap := Label.new()
+		arms_cap.theme_type_variation = &"CaptionLabel"
+		arms_cap.text = "Phase %s allowed arm movements (tap to cycle turn heads):" % ph_lbl_name
+		lcol.add_child(arms_cap)
+
+		var cur_arms: Dictionary = cur_ph["arms"]
+		for arm_v in j["connectedEdgeIds"]:
+			var arm_eid := String(arm_v)
+			if not sim.road_map.has(arm_eid) or not bool(sim.road_map[arm_eid]["isBuilt"]):
+				continue
+			var r_arm: Dictionary = sim.road_map[arm_eid]
+			var mask_val: int = int(cur_arms.get(arm_eid, 0))
+			var ab := Button.new()
+			ab.focus_mode = Control.FOCUS_NONE
+			ab.custom_minimum_size = Vector2(0, 34)
+			ab.text = "%s: %s" % [String(r_arm["name"]), SimEngine.format_turn_mask(mask_val)]
+			ab.pressed.connect(func():
+				sim.cycle_light_arm_turn_mask(jid, _selected_light_phase, arm_eid)
+				_populate_drawer()
+			)
+			lcol.add_child(ab)
+
+		# Yellow & All-Red intergreen sliders
+		var y_sec: float = float(lt.get("yellowSec", 2.0))
+		var ly := Label.new()
+		ly.theme_type_variation = &"CaptionLabel"
+		ly.text = "Yellow clearance: %.1f s · All-red: %.1f s" % [y_sec, float(lt.get("allRedSec", 1.0))]
+		lcol.add_child(ly)
+
+		var sy := HSlider.new()
+		sy.min_value = 1.0
+		sy.max_value = 5.0
+		sy.step = 0.5
+		sy.value = y_sec
+		sy.value_changed.connect(func(v: float):
+			lt["yellowSec"] = v
+			ly.text = "Yellow clearance: %.1f s · All-red: %.1f s" % [v, float(lt.get("allRedSec", 1.0))]
+		)
+		lcol.add_child(sy)
 
 		var act_chk := CheckBox.new()
 		act_chk.focus_mode = Control.FOCUS_NONE
-		act_chk.text = "Actuated gap sensor (switches early when empty)"
+		act_chk.text = "Actuated gap sensor (skips empty phases)"
 		act_chk.set_pressed_no_signal(bool(lt["actuated"]))
-		act_chk.toggled.connect(func(on: bool): lt["actuated"] = on)
+		act_chk.toggled.connect(func(on: bool):
+			lt["actuated"] = on
+			_populate_drawer()
+		)
 		lcol.add_child(act_chk)
+
+		if bool(lt["actuated"]):
+			var gap_v: float = float(lt.get("sensorGapSec", 2.8))
+			var lgap := Label.new()
+			lgap.theme_type_variation = &"CaptionLabel"
+			lgap.text = "Gap-out threshold: %.1f s" % gap_v
+			lcol.add_child(lgap)
+			var sgap := HSlider.new()
+			sgap.min_value = 1.5
+			sgap.max_value = 6.0
+			sgap.step = 0.5
+			sgap.value = gap_v
+			sgap.value_changed.connect(func(v: float):
+				lt["sensorGapSec"] = v
+				lgap.text = "Gap-out threshold: %.1f s" % v
+			)
+			lcol.add_child(sgap)
 
 		var rem := Button.new()
 		rem.theme_type_variation = &"QuietButton"
@@ -1820,22 +2088,57 @@ func _build_authentic_road_panel() -> void:
 		close_drawer()
 		return
 	var r: Dictionary = sim.road_map[rid]
+	var pk_lvl: int = clampi(int(r.get("pocketLevel", 0)), 0, 3)
+	var tmf: int = int(r.get("turnMaskForward", 7))
+	var tmb: int = int(r.get("turnMaskBackward", 7))
 	_inspector_title.text = String(r["name"])
-	_inspector_sub.text = "Class: %s · %d lanes/dir · Congestion: %d%%" % [
-		String(r["roadClass"]).to_upper(), int(r["lanesForward"]), int(round(float(r["congestionEMA"]) * 100.0))
+	_inspector_sub.text = "Class: %s · Lanes %d/%d · Pocket: %s · Congestion: %d%%" % [
+		String(r["roadClass"]).to_upper(),
+		int(r["lanesForward"]),
+		int(r["lanesBackward"]),
+		GameCatalog.POCKET_LABELS[pk_lvl],
+		int(round(float(r["congestionEMA"]) * 100.0))
 	]
 
+	var dir_grid := GridContainer.new()
+	dir_grid.columns = 2
+	dir_grid.add_theme_constant_override("h_separation", 6)
+	dir_grid.add_theme_constant_override("v_separation", 6)
+	_inspector_body.add_child(dir_grid)
+
+	for dact in [
+		["+ Lane (Both)", func(): show_toast_banner(sim.modify_road_lanes(rid, 1, "both")); _populate_drawer(), true],
+		["− Lane (Both)", func(): show_toast_banner(sim.modify_road_lanes(rid, -1, "both")); _populate_drawer(), false],
+		["+ Fwd Lane", func(): show_toast_banner(sim.modify_road_lanes(rid, 1, "forward")); _populate_drawer(), false],
+		["+ Back Lane", func(): show_toast_banner(sim.modify_road_lanes(rid, 1, "backward")); _populate_drawer(), false],
+	]:
+		var db := Button.new()
+		if bool(dact[2]):
+			db.theme_type_variation = &"PrimaryButton"
+		db.focus_mode = Control.FOCUS_NONE
+		db.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		db.custom_minimum_size = Vector2(0, 38)
+		db.text = String(dact[0])
+		db.pressed.connect(dact[1] as Callable)
+		dir_grid.add_child(db)
+
+	var cut_n: int = sim.count_routes_cut_by_closing(rid)
+	var close_lbl: String = "Reopen street ($0)" if bool(r["closed"]) else (
+		("Close street ($3,200 · cuts %d routes!)" % cut_n) if cut_n > 0 else "Close street into pedestrian park ($3,200)"
+	)
+
 	for act in [
-		["+ Add lane (both directions)", func(): show_toast_banner(sim.modify_road_lanes(rid, 1)); _populate_drawer(), true],
-		["− Remove lane (50% refund)", func(): show_toast_banner(sim.modify_road_lanes(rid, -1)); _populate_drawer(), false],
+		["Turn Pocket: %s (tap to cycle, $600/lvl)" % GameCatalog.POCKET_LABELS[pk_lvl], func(): show_toast_banner(sim.cycle_road_pocket(rid)); _populate_drawer(), false],
+		["Fwd Turn Arrows: %s" % SimEngine.format_turn_mask(tmf), func(): show_toast_banner(sim.cycle_road_turn_mask(rid, true)); _populate_drawer(), false],
+		["Back Turn Arrows: %s" % SimEngine.format_turn_mask(tmb), func(): show_toast_banner(sim.cycle_road_turn_mask(rid, false)); _populate_drawer(), false],
 		["⇄ Cycle Two-way / One-way ($0)", func(): show_toast_banner(sim.cycle_road_one_way(rid)); _populate_drawer(), false],
-		["Reopen street ($0)" if bool(r["closed"]) else "Close street into pedestrian park ($3,200)", func(): show_toast_banner(sim.toggle_close_street(rid)); _populate_drawer(), false],
+		[close_lbl, func(): show_toast_banner(sim.toggle_close_street(rid)); _populate_drawer(), false],
 	]:
 		var b := Button.new()
 		if bool(act[2]):
 			b.theme_type_variation = &"PrimaryButton"
 		b.focus_mode = Control.FOCUS_NONE
-		b.custom_minimum_size = Vector2(0, 42)
+		b.custom_minimum_size = Vector2(0, 40)
 		b.text = String(act[0])
 		b.pressed.connect(act[1] as Callable)
 		_inspector_body.add_child(b)
@@ -1942,6 +2245,10 @@ func _populate_modal_tabs() -> void:
 		_modal_graph.visible = false
 		_build_overview_trucks_tab()
 	elif tab == 2:
+		_modal_title.text = "Operational Alerts"
+		_modal_graph.visible = false
+		_build_overview_alerts_tab()
+	elif tab == 3:
 		_modal_title.text = "Karesidenan Madiun Maps"
 		_modal_graph.visible = false
 		_build_overview_maps_tab()
@@ -1960,7 +2267,7 @@ func _build_overview_routes_tab() -> void:
 	hint.theme_type_variation = &"CaptionLabel"
 	hint.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	hint.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-	hint.text = "Open new routes by tapping a building or '+ Open new route'. Swap model trades all trucks on a route in for another."
+	hint.text = "Open new routes by tapping a building or '+ Open new route'. Tap a road junction while viewing a route to add/remove waypoints."
 	top_bar.add_child(hint)
 
 	var new_rt := Button.new()
@@ -2063,9 +2370,11 @@ func _build_overview_routes_tab() -> void:
 		)
 		actions.add_child(buy_b)
 
+		var owned_m: int = sim.get_owned_count_by_model(m_id)
+		var resale_p: int = GameCatalog.compute_truck_resale_price(m_id, owned_m, sim.agents.size()) if cnt > 0 else 0
 		var sell_b := Button.new()
 		sell_b.focus_mode = Control.FOCUS_NONE
-		sell_b.text = "Sell"
+		sell_b.text = ("Sell +" + GameCatalog.fmt_cash(resale_p)) if cnt > 0 else "Sell"
 		sell_b.disabled = (cnt <= 0)
 		sell_b.set_meta(&"sfx", "sell")
 		sell_b.pressed.connect(func():
@@ -2097,6 +2406,43 @@ func _build_overview_routes_tab() -> void:
 			_build_overview_routes_tab()
 		)
 		actions.add_child(ret_b)
+
+		var sub_row := HBoxContainer.new()
+		sub_row.add_theme_constant_override("separation", 10)
+		var br_txt := String(rt.get("brokenReason", ""))
+		if br_txt != "":
+			var br_lbl := Label.new()
+			br_lbl.text = "⚠ " + br_txt
+			br_lbl.add_theme_color_override("font_color", _status_col(&"bad", Color("C2412F")))
+			sub_row.add_child(br_lbl)
+
+		var wp_cnt: int = (rt["waypoints"] as Array).size()
+		var wp_lbl := Label.new()
+		wp_lbl.theme_type_variation = &"CaptionLabel"
+		wp_lbl.text = "Waypoints: %d" % wp_cnt
+		sub_row.add_child(wp_lbl)
+
+		if wp_cnt > 0:
+			var clr_b := Button.new()
+			clr_b.theme_type_variation = &"QuietButton"
+			clr_b.focus_mode = Control.FOCUS_NONE
+			clr_b.text = "Clear waypoints"
+			clr_b.pressed.connect(func():
+				sim.clear_route_waypoints(rtid)
+				_build_overview_routes_tab()
+			)
+			sub_row.add_child(clr_b)
+
+		var swb_c := CheckBox.new()
+		swb_c.focus_mode = Control.FOCUS_NONE
+		swb_c.text = "Same way back"
+		swb_c.set_pressed_no_signal(bool(rt.get("sameWayBack", true)))
+		swb_c.toggled.connect(func(on: bool):
+			sim.set_route_same_way_back(rtid, on)
+			_build_overview_routes_tab()
+		)
+		sub_row.add_child(swb_c)
+		vbox.add_child(sub_row)
 
 		if _overview_swap_route_id == rtid:
 			var sw_row := HBoxContainer.new()
@@ -2200,6 +2546,76 @@ func _build_overview_trucks_tab() -> void:
 
 		grid.add_child(card)
 
+func _build_overview_alerts_tab() -> void:
+	for ch in _tab_alerts_vbox.get_children():
+		ch.queue_free()
+
+	var alerts: Array[Dictionary] = sim.get_system_alerts()
+	if alerts.is_empty():
+		var ok_card := PanelContainer.new()
+		ok_card.theme_type_variation = &"CardPanel"
+		var ok_lbl := Label.new()
+		ok_lbl.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+		ok_lbl.text = "✓ All routes, factories, hubs, and road corridors are operating smoothly."
+		ok_lbl.add_theme_color_override("font_color", _status_col(&"good", Color("2C7442")))
+		ok_card.add_child(ok_lbl)
+		_tab_alerts_vbox.add_child(ok_card)
+		return
+
+	var cb: bool = map_view.colorblind_mode if map_view != null else false
+	for al in alerts:
+		var sev := String(al.get("severity", "warn"))
+		var wpos: Vector2 = al.get("pos", Vector2.ZERO)
+		var rtid := String(al.get("routeId", ""))
+		var fid := String(al.get("facilityId", ""))
+		var eid := String(al.get("edgeId", ""))
+
+		var acard := PanelContainer.new()
+		acard.theme_type_variation = &"CardPanel"
+		var row := HBoxContainer.new()
+		row.add_theme_constant_override("separation", 10)
+		acard.add_child(row)
+
+		var bar := ColorRect.new()
+		bar.color = GameCatalog.status_color(sev, cb)
+		bar.custom_minimum_size = Vector2(6, 36)
+		row.add_child(bar)
+
+		var tcol := VBoxContainer.new()
+		tcol.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		tcol.add_theme_constant_override("separation", 2)
+		var t := Label.new()
+		t.theme_type_variation = &"CardTitleLabel"
+		t.text = String(al["title"])
+		tcol.add_child(t)
+		var sub := Label.new()
+		sub.theme_type_variation = &"CaptionLabel"
+		sub.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+		sub.text = String(al["subtitle"])
+		tcol.add_child(sub)
+		row.add_child(tcol)
+
+		var go_b := Button.new()
+		go_b.theme_type_variation = &"PrimaryButton"
+		go_b.focus_mode = Control.FOCUS_NONE
+		go_b.text = "Inspect →"
+		go_b.pressed.connect(func():
+			focus_world_requested.emit(wpos)
+			if fid != "" and sim.facility_map.has(fid):
+				map_view.selected_facility_id = fid
+				open_drawer("facility")
+			elif eid != "" and sim.road_map.has(eid):
+				map_view.selected_road_id = eid
+				open_drawer("road")
+			elif rtid != "":
+				map_view.selected_route_id = rtid
+				open_drawer("routes")
+			else:
+				close_drawer()
+		)
+		row.add_child(go_b)
+		_tab_alerts_vbox.add_child(acard)
+
 func _build_overview_maps_tab() -> void:
 	for ch in _tab_maps_vbox.get_children():
 		ch.queue_free()
@@ -2288,6 +2704,7 @@ func _build_overview_options_tab() -> void:
 	for ch in _tab_opts_vbox.get_children():
 		ch.queue_free()
 
+	# 1. Android Frame Pacing & GPU Optimization
 	var p_card := PanelContainer.new()
 	p_card.theme_type_variation = &"CardPanel"
 	var p_col := VBoxContainer.new()
@@ -2322,11 +2739,17 @@ func _build_overview_options_tab() -> void:
 	p_col.add_child(seg)
 	_tab_opts_vbox.add_child(p_card)
 
+	# 2. Gameplay, Graphics & Accessibility Options
 	var opt_card := PanelContainer.new()
 	opt_card.theme_type_variation = &"CardPanel"
 	var o_col := VBoxContainer.new()
-	o_col.add_theme_constant_override("separation", 8)
+	o_col.add_theme_constant_override("separation", 6)
 	opt_card.add_child(o_col)
+
+	var v_title := Label.new()
+	v_title.theme_type_variation = &"CardTitleLabel"
+	v_title.text = "Visuals, Accessibility & Traffic Standard"
+	o_col.add_child(v_title)
 
 	var chk_lht := CheckBox.new()
 	chk_lht.focus_mode = Control.FOCUS_NONE
@@ -2350,12 +2773,122 @@ func _build_overview_options_tab() -> void:
 	)
 	o_col.add_child(chk_dark)
 
+	var chk_fly := CheckBox.new()
+	chk_fly.focus_mode = Control.FOCUS_NONE
+	chk_fly.text = "Hide Flyovers / Ghost Elevated Bridges (Update 1.9)"
+	chk_fly.set_pressed_no_signal(map_view != null and map_view.hide_flyovers)
+	chk_fly.toggled.connect(func(on: bool):
+		hide_flyovers_toggled.emit(on)
+	)
+	o_col.add_child(chk_fly)
+
+	var chk_cb := CheckBox.new()
+	chk_cb.focus_mode = Control.FOCUS_NONE
+	chk_cb.text = "Colour-blind Accessible Palette (Blue / Amber / Magenta)"
+	chk_cb.set_pressed_no_signal(map_view != null and map_view.colorblind_mode)
+	chk_cb.toggled.connect(func(on: bool):
+		colorblind_toggled.emit(on)
+		_sync_overlay_bar()
+	)
+	o_col.add_child(chk_cb)
+
+	var chk_clouds := CheckBox.new()
+	chk_clouds.focus_mode = Control.FOCUS_NONE
+	chk_clouds.text = "Drifting Cloud Puffs & Shadows on Locked Regions"
+	chk_clouds.set_pressed_no_signal(map_view == null or map_view.cloud_shadows_enabled)
+	chk_clouds.toggled.connect(func(on: bool):
+		cloud_shadows_toggled.emit(on)
+	)
+	o_col.add_child(chk_clouds)
+	_tab_opts_vbox.add_child(opt_card)
+
+	# 3. Audio Channels & Tactile Haptics
+	var aud_card := PanelContainer.new()
+	aud_card.theme_type_variation = &"CardPanel"
+	var a_col := VBoxContainer.new()
+	a_col.add_theme_constant_override("separation", 6)
+	aud_card.add_child(a_col)
+
+	var a_title := Label.new()
+	a_title.theme_type_variation = &"CardTitleLabel"
+	a_title.text = "Audio Channels & Android Haptics"
+	a_col.add_child(a_title)
+
 	var chk_sfx := CheckBox.new()
 	chk_sfx.focus_mode = Control.FOCUS_NONE
 	chk_sfx.text = "Original Incremental Traffic UI Sound Effects (26 WAVs)"
-	chk_sfx.set_pressed_no_signal(not sim.sfx.muted)
-	chk_sfx.toggled.connect(func(on: bool): sim.sfx.muted = not on)
-	o_col.add_child(chk_sfx)
+	chk_sfx.set_pressed_no_signal(sim.sfx != null and not sim.sfx.muted)
+	chk_sfx.toggled.connect(func(on: bool):
+		if sim.sfx != null:
+			sim.sfx.muted = not on
+	)
+	a_col.add_child(chk_sfx)
+
+	var chk_coin := CheckBox.new()
+	chk_coin.focus_mode = Control.FOCUS_NONE
+	chk_coin.text = "Money Popup Delivery Coin Chimes"
+	chk_coin.set_pressed_no_signal(sim.sfx == null or sim.sfx.money_popup_sound)
+	chk_coin.toggled.connect(func(on: bool):
+		if sim.sfx != null:
+			sim.sfx.money_popup_sound = on
+	)
+	a_col.add_child(chk_coin)
+
+	var chk_hap := CheckBox.new()
+	chk_hap.focus_mode = Control.FOCUS_NONE
+	chk_hap.text = "Android Tactile Haptics"
+	chk_hap.set_pressed_no_signal(sim.sfx == null or sim.sfx.haptics_enabled)
+	chk_hap.toggled.connect(func(on: bool):
+		if sim.sfx != null:
+			sim.sfx.haptics_enabled = on
+	)
+	a_col.add_child(chk_hap)
+
+	if sim.sfx != null:
+		var mv_lbl := Label.new()
+		mv_lbl.theme_type_variation = &"CaptionLabel"
+		mv_lbl.text = "Master Volume: %d%%" % int(round(sim.sfx.master_volume * 100.0))
+		a_col.add_child(mv_lbl)
+		var mv_s := HSlider.new()
+		mv_s.min_value = 0.0
+		mv_s.max_value = 1.0
+		mv_s.step = 0.05
+		mv_s.value = sim.sfx.master_volume
+		mv_s.value_changed.connect(func(v: float):
+			sim.sfx.set_volumes(v, sim.sfx.ui_volume, sim.sfx.delivery_volume)
+			mv_lbl.text = "Master Volume: %d%%" % int(round(v * 100.0))
+		)
+		a_col.add_child(mv_s)
+
+		var uv_lbl := Label.new()
+		uv_lbl.theme_type_variation = &"CaptionLabel"
+		uv_lbl.text = "UI Sound Volume: %d%%" % int(round(sim.sfx.ui_volume * 100.0))
+		a_col.add_child(uv_lbl)
+		var uv_s := HSlider.new()
+		uv_s.min_value = 0.0
+		uv_s.max_value = 1.0
+		uv_s.step = 0.05
+		uv_s.value = sim.sfx.ui_volume
+		uv_s.value_changed.connect(func(v: float):
+			sim.sfx.set_volumes(sim.sfx.master_volume, v, sim.sfx.delivery_volume)
+			uv_lbl.text = "UI Sound Volume: %d%%" % int(round(v * 100.0))
+		)
+		a_col.add_child(uv_s)
+
+		var dv_lbl := Label.new()
+		dv_lbl.theme_type_variation = &"CaptionLabel"
+		dv_lbl.text = "Delivery Coin Volume: %d%%" % int(round(sim.sfx.delivery_volume * 100.0))
+		a_col.add_child(dv_lbl)
+		var dv_s := HSlider.new()
+		dv_s.min_value = 0.0
+		dv_s.max_value = 1.0
+		dv_s.step = 0.05
+		dv_s.value = sim.sfx.delivery_volume
+		dv_s.value_changed.connect(func(v: float):
+			sim.sfx.set_volumes(sim.sfx.master_volume, sim.sfx.ui_volume, v)
+			dv_lbl.text = "Delivery Coin Volume: %d%%" % int(round(v * 100.0))
+		)
+		a_col.add_child(dv_s)
 
 	var rst_btn := Button.new()
 	rst_btn.focus_mode = Control.FOCUS_NONE
@@ -2365,8 +2898,8 @@ func _build_overview_options_tab() -> void:
 		close_drawer()
 		show_toast_banner("Map reset to starting state.", 2.5)
 	)
-	o_col.add_child(rst_btn)
-	_tab_opts_vbox.add_child(opt_card)
+	a_col.add_child(rst_btn)
+	_tab_opts_vbox.add_child(aud_card)
 
 
 # ============================================================================
