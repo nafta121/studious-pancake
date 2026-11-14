@@ -42,6 +42,7 @@ func _ready() -> void:
 
 	camera = TouchCamera2D.new()
 	camera.enabled = true
+	camera.ui_input_blocker = Callable(self, "_should_block_camera_input")
 	add_child(camera)
 	camera.focus_map(sim.map_def["initialView"], sim.map_def["boundsWorld"])
 	if not sim.camera_meta.is_empty():
@@ -70,10 +71,21 @@ func _ready() -> void:
 	hud.colorblind_toggled.connect(func(on: bool): map_view.set_colorblind_mode(on))
 	hud.cloud_shadows_toggled.connect(func(on: bool): map_view.set_cloud_shadows(on))
 	hud.focus_world_requested.connect(func(p: Vector2): camera.pan_to_world(p, 0.85))
+	hud.tool_changed.connect(func(_tid: String):
+		if camera != null:
+			camera.clear_double_tap()
+	)
 
 	stage_overlays = StageOverlays.new()
 	add_child(stage_overlays)
 	stage_overlays.setup(sim, camera, map_view, hud, sfx)
+
+	hud.confirm_requested.connect(func(title_txt: String, body_txt: String, confirm_lbl: String, action: Callable):
+		if stage_overlays != null:
+			stage_overlays.show_confirm_modal(title_txt, body_txt, confirm_lbl, action, "")
+		elif action.is_valid():
+			action.call()
+	)
 
 	world_shows.show_completed.connect(func(info: Dictionary):
 		if not _smoke_mode:
@@ -85,7 +97,7 @@ func _ready() -> void:
 	stage_overlays.map_load_requested.connect(_on_stage_map_load_requested)
 	stage_overlays.title_visibility_changed.connect(func(open: bool):
 		if world_shows != null:
-			world_shows.ui_blocked = open or stage_overlays.is_modal_open
+			world_shows.ui_blocked = open or stage_overlays.is_modal_open or stage_overlays.is_loading_open() or (hud != null and hud.is_modal_open())
 	)
 
 	if _smoke_mode:
@@ -93,21 +105,100 @@ func _ready() -> void:
 	else:
 		stage_overlays.show_title_stage()
 
+func _should_block_camera_input(event: InputEvent) -> bool:
+	if stage_overlays != null and (stage_overlays.is_title_open or stage_overlays.is_modal_open or stage_overlays.is_loading_open()):
+		return true
+	if hud != null and hud.is_modal_open():
+		return true
+	if event is InputEventScreenTouch:
+		var pt: Vector2 = (event as InputEventScreenTouch).position
+		return (stage_overlays != null and stage_overlays.is_screen_point_over_overlay(pt)) or (hud != null and hud.is_screen_point_over_hud(pt))
+	if event is InputEventMouseButton:
+		var pt_m: Vector2 = (event as InputEventMouseButton).position
+		return (stage_overlays != null and stage_overlays.is_screen_point_over_overlay(pt_m)) or (hud != null and hud.is_screen_point_over_hud(pt_m))
+	return false
+
+func _sync_camera_meta_if_gameplay() -> void:
+	if camera == null or sim == null:
+		return
+	if camera.title_orbit_active or camera.cinematic_locked:
+		return
+	if stage_overlays != null and stage_overlays.is_title_open:
+		return
+	sim.camera_meta = camera.export_camera_meta()
+
+func _unhandled_input(event: InputEvent) -> void:
+	if event is InputEventKey:
+		var ke := event as InputEventKey
+		if ke.pressed and not ke.echo and ke.keycode == KEY_ESCAPE:
+			get_viewport().set_input_as_handled()
+			handle_back_navigation()
+
+func handle_back_navigation() -> void:
+	if stage_overlays != null and stage_overlays.is_loading_open():
+		return
+	if stage_overlays != null and stage_overlays.is_modal_open:
+		stage_overlays.handle_modal_back()
+		return
+	if stage_overlays != null and stage_overlays.is_title_open:
+		if stage_overlays.is_new_game_subpanel_open():
+			stage_overlays.close_new_game_subpanel()
+			return
+		_sync_camera_meta_if_gameplay()
+		sim.save_to_disk()
+		if sfx != null:
+			sfx.shutdown()
+		get_tree().quit()
+		return
+	if hud != null and hud.current_drawer != "":
+		hud.close_drawer()
+		return
+	if hud != null and hud.close_popovers():
+		return
+	if stage_overlays != null and stage_overlays.close_reroute_panel():
+		return
+	if world_shows != null and world_shows.preview_offer_id != "":
+		world_shows.preview_offer_id = ""
+		return
+	if map_view != null and map_view.active_tool != "pan":
+		hud._on_toolbar_pressed("pan")
+		return
+	if stage_overlays != null:
+		stage_overlays.show_pause_menu()
+		return
+	_sync_camera_meta_if_gameplay()
+	sim.save_to_disk()
+	if sfx != null:
+		sfx.shutdown()
+	get_tree().quit()
+
 func _process(delta: float) -> void:
 	if sim == null:
 		return
 
-	if world_shows != null and stage_overlays != null:
-		world_shows.ui_blocked = stage_overlays.is_title_open or stage_overlays.is_modal_open
+	var ui_modal_busy: bool = (
+		(stage_overlays != null and (stage_overlays.is_title_open or stage_overlays.is_modal_open or stage_overlays.is_loading_open()))
+		or (hud != null and hud.is_modal_open())
+	)
+	if world_shows != null:
+		world_shows.ui_blocked = ui_modal_busy
+	if camera != null and map_view != null:
+		camera.allow_double_tap_zoom = (
+			not ui_modal_busy
+			and map_view.active_tool == "pan"
+			and map_view.selected_route_id == ""
+		)
 
-	sim.step_frame(delta)
+	var stage_freezes_sim: bool = (not _smoke_mode) and stage_overlays != null and (stage_overlays.is_title_open or stage_overlays.is_loading_open())
+	if not stage_freezes_sim:
+		sim.step_frame(delta)
 
 	if sfx != null and camera != null and not _smoke_mode:
 		var jammed_cnt: int = 0
 		for ag in sim.agents:
 			if float(ag.get("stuckTimer", 0.0)) > 1.2:
 				jammed_cnt += 1
-		var is_paused: bool = (sim.speed_multiplier == 0) or (stage_overlays != null and stage_overlays.is_modal_open)
+		var is_paused: bool = stage_freezes_sim or (sim.speed_multiplier == 0) or (stage_overlays != null and stage_overlays.is_modal_open)
 		sfx.update_world_ambience(delta, camera.zoom.x, jammed_cnt, sim.agents.size(), is_paused)
 
 	if hud != null and hud.follow_truck_id != "":
@@ -122,12 +213,12 @@ func _process(delta: float) -> void:
 		_step_smoke()
 		return
 
-	_autosave_timer += delta
-	if _autosave_timer >= 25.0:
-		_autosave_timer = 0.0
-		if camera != null:
-			sim.camera_meta = camera.export_camera_meta()
-		sim.save_to_disk()
+	if not stage_freezes_sim:
+		_autosave_timer += delta
+		if _autosave_timer >= 25.0:
+			_autosave_timer = 0.0
+			_sync_camera_meta_if_gameplay()
+			sim.save_to_disk()
 
 func _notification(what: int) -> void:
 	if what == NOTIFICATION_WM_CLOSE_REQUEST:
@@ -137,33 +228,13 @@ func _notification(what: int) -> void:
 	if sim == null:
 		return
 	if what == NOTIFICATION_APPLICATION_PAUSED or what == NOTIFICATION_APPLICATION_FOCUS_OUT:
-		if camera != null:
-			sim.camera_meta = camera.export_camera_meta()
+		_sync_camera_meta_if_gameplay()
 		sim.save_to_disk()
 		Engine.max_fps = 10
 	elif what == NOTIFICATION_APPLICATION_RESUMED or what == NOTIFICATION_APPLICATION_FOCUS_IN:
 		Engine.max_fps = _target_fps
 	elif what == NOTIFICATION_WM_GO_BACK_REQUEST:
-		if stage_overlays != null and stage_overlays.is_modal_open:
-			stage_overlays.close_modal(true)
-		elif stage_overlays != null and stage_overlays.is_title_open:
-			if camera != null:
-				sim.camera_meta = camera.export_camera_meta()
-			sim.save_to_disk()
-			if sfx != null:
-				sfx.shutdown()
-			get_tree().quit()
-		elif hud != null and hud.current_drawer != "":
-			hud.close_drawer()
-		elif map_view != null and map_view.active_tool != "pan":
-			hud._on_toolbar_pressed("pan")
-		elif stage_overlays != null:
-			stage_overlays.show_pause_menu()
-		else:
-			sim.save_to_disk()
-			if sfx != null:
-				sfx.shutdown()
-			get_tree().quit()
+		handle_back_navigation()
 
 func _reset_view_selection() -> void:
 	map_view.selected_facility_id = ""
@@ -179,8 +250,7 @@ func _reset_view_selection() -> void:
 		hud.follow_truck_id = ""
 
 func _on_stage_map_load_requested(map_id: String, load_save: bool, city_code: String) -> void:
-	if camera != null:
-		sim.camera_meta = camera.export_camera_meta()
+	_sync_camera_meta_if_gameplay()
 	sim.save_to_disk()
 	if city_code != "":
 		var dec: Dictionary = StageOverlays.decode_city_code(city_code, sim.maps_list.size())
@@ -208,8 +278,7 @@ func _on_map_selected(map_id: String) -> void:
 		_perform_direct_map_switch(map_id)
 
 func _perform_direct_map_switch(map_id: String) -> void:
-	if camera != null:
-		sim.camera_meta = camera.export_camera_meta()
+	_sync_camera_meta_if_gameplay()
 	sim.save_to_disk()
 	sim.load_map(map_id, not _smoke_mode)
 	_reset_view_selection()
@@ -235,7 +304,9 @@ func _on_theme_toggled(is_dark: bool) -> void:
 	map_view.set_theme_dark(is_dark)
 
 func _on_world_tapped(world_pos: Vector2) -> void:
-	if stage_overlays != null and (stage_overlays.is_title_open or stage_overlays.is_modal_open):
+	if stage_overlays != null and (stage_overlays.is_title_open or stage_overlays.is_modal_open or stage_overlays.is_loading_open()):
+		return
+	if hud != null and hud.is_modal_open():
 		return
 
 	var inv_z: float = 1.0 / maxf(0.28, camera.zoom.x)
@@ -311,12 +382,14 @@ func _on_world_tapped(world_pos: Vector2) -> void:
 	# Default 'pan' / inspect mode:
 	# 0) Interactive `RegionGate` (`OPEN` / `GROW`) & in-world `RoadOfferSigns` (2-tap preview + purchase)!
 	if world_shows != null and world_shows.try_handle_world_tap(world_pos):
+		camera.clear_double_tap()
 		return
 
 	# 1) Waypoint editing when a route is highlighted on the map
 	if map_view.selected_route_id != "" and hud.current_drawer in ["", "routes"]:
 		var j_wp: Dictionary = RoadGeom.hit_test_junction(sim.junctions, sim.unlocked_regions, world_pos, junc_r)
 		if not j_wp.is_empty():
+			camera.clear_double_tap()
 			var j_wp_id := String(j_wp["id"])
 			sim.toggle_route_waypoint(map_view.selected_route_id, j_wp_id, map_view.editing_return_waypoints)
 			if hud.current_drawer == "routes":
@@ -328,6 +401,7 @@ func _on_world_tapped(world_pos: Vector2) -> void:
 	# 2) Direct Truck hit-test -> opens authentic `TruckInspector`!
 	var ag_hit: Dictionary = sim.hit_test_agent(world_pos, trk_r, false)
 	if not ag_hit.is_empty():
+		camera.clear_double_tap()
 		sfx.tap(10)
 		map_view.selected_truck_id = String(ag_hit["id"])
 		map_view.selected_facility_id = ""
@@ -339,6 +413,7 @@ func _on_world_tapped(world_pos: Vector2) -> void:
 	# 3) Facility -> Junction -> Road
 	var fac: Dictionary = RoadGeom.hit_test_facility(sim.facilities, sim.unlocked_regions, world_pos, fac_r)
 	if not fac.is_empty():
+		camera.clear_double_tap()
 		sfx.tap(10)
 		hud.follow_truck_id = ""
 		map_view.selected_truck_id = ""
@@ -350,6 +425,7 @@ func _on_world_tapped(world_pos: Vector2) -> void:
 
 	var junc: Dictionary = RoadGeom.hit_test_junction(sim.junctions, sim.unlocked_regions, world_pos, junc_r)
 	if not junc.is_empty():
+		camera.clear_double_tap()
 		var j_id := String(junc["id"])
 		sfx.tap(10)
 		hud.follow_truck_id = ""
@@ -362,6 +438,7 @@ func _on_world_tapped(world_pos: Vector2) -> void:
 
 	var rd: Dictionary = RoadGeom.hit_test_road(sim.roads, sim.unlocked_regions, world_pos, road_r, false)
 	if not rd.is_empty():
+		camera.clear_double_tap()
 		sfx.tap(10)
 		hud.follow_truck_id = ""
 		map_view.selected_truck_id = ""

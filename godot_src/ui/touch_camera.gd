@@ -16,6 +16,8 @@ var title_orbit_active: bool = false
 var title_orbit_center := Vector2.ZERO
 var title_orbit_radius: float = 48.0
 var _title_orbit_angle: float = 0.0
+var ui_input_blocker: Callable = Callable()
+var allow_double_tap_zoom: bool = true
 
 var _touches: Dictionary = {} # finger_index -> Vector2 screen pos
 var _prev_pinch_dist: float = 0.0
@@ -180,8 +182,25 @@ func _process(delta: float) -> void:
 	elif not _touches.is_empty():
 		_pan_velocity = _pan_velocity.lerp(Vector2.ZERO, minf(1.0, delta * 12.0))
 
+func reset_touch_state() -> void:
+	_touches.clear()
+	_prev_pinch_dist = 0.0
+	_pan_velocity = Vector2.ZERO
+	_tap_moved = true
+
+func clear_double_tap() -> void:
+	_last_tap_msec = 0
+
 func _unhandled_input(event: InputEvent) -> void:
 	if cinematic_locked or title_orbit_active:
+		reset_touch_state()
+		return
+
+	if ui_input_blocker.is_valid() and bool(ui_input_blocker.call(event)):
+		if event is InputEventScreenTouch and not (event as InputEventScreenTouch).pressed:
+			_touches.erase((event as InputEventScreenTouch).index)
+		if _touches.is_empty():
+			_pan_velocity = Vector2.ZERO
 		return
 
 	if event is InputEventScreenTouch:
@@ -194,8 +213,9 @@ func _unhandled_input(event: InputEvent) -> void:
 				_tap_start_msec = Time.get_ticks_msec()
 				_tap_moved = false
 				_pan_velocity = Vector2.ZERO
-			elif _touches.size() == 2:
+			elif _touches.size() >= 2:
 				_tap_moved = true
+				_pan_velocity = Vector2.ZERO
 				var pts: Array = _touches.values()
 				_prev_pinch_dist = (pts[0] as Vector2).distance_to(pts[1] as Vector2)
 		else:
@@ -205,7 +225,7 @@ func _unhandled_input(event: InputEvent) -> void:
 			if was_single and not _tap_moved:
 				var dt_ms: int = Time.get_ticks_msec() - _tap_start_msec
 				if dt_ms < 380 and st.position.distance_to(_tap_start_pos) < 16.0:
-					if Time.get_ticks_msec() - _last_tap_msec < 280 and st.position.distance_to(_last_tap_screen) < 28.0:
+					if allow_double_tap_zoom and Time.get_ticks_msec() - _last_tap_msec < 280 and st.position.distance_to(_last_tap_screen) < 28.0:
 						_zoom_around_screen_point(st.position, 1.38)
 						_last_tap_msec = 0
 					else:
@@ -215,6 +235,9 @@ func _unhandled_input(event: InputEvent) -> void:
 
 	elif event is InputEventScreenDrag:
 		var sd := event as InputEventScreenDrag
+		# Ignore drags from fingers whose initial press was consumed by GUI controls or modals!
+		if not _touches.has(sd.index):
+			return
 		_fly_active = false
 		_touches[sd.index] = sd.position
 		if not _tap_moved and sd.position.distance_to(_tap_start_pos) > 12.0:
@@ -228,6 +251,7 @@ func _unhandled_input(event: InputEvent) -> void:
 			_pan_velocity = _pan_velocity.limit_length(1800.0)
 			_clamp_to_bounds()
 		elif _touches.size() >= 2:
+			_pan_velocity = Vector2.ZERO
 			var keys: Array = _touches.keys()
 			var p0: Vector2 = _touches[keys[0]]
 			var p1: Vector2 = _touches[keys[1]]

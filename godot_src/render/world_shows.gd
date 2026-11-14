@@ -152,8 +152,12 @@ func try_handle_world_tap(world_pos: Vector2) -> bool:
 	if sim == null or camera == null or ui_blocked:
 		return false
 
+	var inv_z: float = 1.0 / maxf(0.28, camera.zoom.x)
+	var gate_pad: float = maxf(8.0, 12.0 * inv_z)
+	var sign_pad: float = maxf(10.0, 14.0 * inv_z)
+
 	# 1. Check interactive `RegionGate` world card / button
-	if _gate_hit_world.size.x > 1.0 and _gate_hit_world.grow(6.0).has_point(world_pos):
+	if _gate_hit_world.size.x > 1.0 and _gate_hit_world.grow(gate_pad).has_point(world_pos):
 		var gate: Dictionary = sim.get_region_gate_state()
 		if bool(gate.get("hasGate", false)):
 			if bool(gate.get("isReady", false)):
@@ -172,7 +176,7 @@ func try_handle_world_tap(world_pos: Vector2) -> bool:
 	# 2. Check in-world `RoadOfferSigns` (2-tap preview -> purchase!)
 	for entry in _offer_hit_rects:
 		var r_rect: Rect2 = entry["rect"]
-		if r_rect.grow(5.0).has_point(world_pos):
+		if r_rect.grow(sign_pad).has_point(world_pos):
 			var oid := String(entry["id"])
 			if preview_offer_id != oid:
 				preview_offer_id = oid
@@ -427,8 +431,8 @@ func _draw_road_offer_signs(frustum: Rect2, font: Font, inv_z: float) -> void:
 		var is_prev: bool = (oid == preview_offer_id)
 
 		var pr_txt: String = ("BANGUN " if is_prev else "🛣 ") + GameCatalog.fmt_cash(pr)
-		var pw: float = (22.0 + float(pr_txt.length()) * 6.2) * sc
-		var ph: float = 20.0 * sc
+		var pw: float = (26.0 + float(pr_txt.length()) * 6.5) * sc
+		var ph: float = 25.0 * sc
 		var box := Rect2(spos.x - pw * 0.5, spos.y - ph * 0.5, pw, ph)
 		_offer_hit_rects.append({
 			"id": oid,
@@ -444,7 +448,7 @@ func _draw_road_offer_signs(frustum: Rect2, font: Font, inv_z: float) -> void:
 		var tx_c: Color = Color.WHITE if is_prev else (Color("23242B") if can_afford else Color("6E6B63"))
 		draw_rect(box, bg_c, true)
 		draw_rect(box, bd_c, false, 1.9 * sc)
-		draw_string(font, Vector2(box.position.x + 4.0 * sc, box.position.y + 14.2 * sc), pr_txt, HORIZONTAL_ALIGNMENT_CENTER, pw - 8.0 * sc, int(10.5 * sc), tx_c)
+		draw_string(font, Vector2(box.position.x + 4.0 * sc, box.position.y + 16.8 * sc), pr_txt, HORIZONTAL_ALIGNMENT_CENTER, pw - 8.0 * sc, int(11.0 * sc), tx_c)
 
 func _draw_interactive_region_gate(frustum: Rect2, font: Font, inv_z: float, cb: bool) -> void:
 	var gate: Dictionary = sim.get_region_gate_state()
@@ -506,13 +510,13 @@ func _draw_interactive_region_gate(frustum: Rect2, font: Font, inv_z: float, cb:
 	if is_ready:
 		var btn_txt := "🔓 " + String(gate.get("buttonText", "OPEN")) + " SEKARANG!"
 		var bw: float = (card_w - 14.0 * sc) * pulse
-		var bh: float = 18.5 * sc * pulse
+		var bh: float = 21.0 * sc * pulse
 		var btn_r := Rect2(rc.x - bw * 0.5, card_r.end.y - 4.0 * sc, bw, bh)
 		_gate_hit_world = card_r.merge(btn_r)
 		draw_rect(Rect2(btn_r.position + Vector2(1.5 * sc, 2.0 * sc), btn_r.size), Color("23242B"), true)
 		draw_rect(btn_r, accent, true)
 		draw_rect(btn_r, Color("FAF7EE"), false, 1.5 * sc)
-		draw_string(font, Vector2(btn_r.position.x + 4.0 * sc, btn_r.position.y + 13.2 * sc), btn_txt, HORIZONTAL_ALIGNMENT_CENTER, bw - 8.0 * sc, int(9.8 * sc), Color.WHITE)
+		draw_string(font, Vector2(btn_r.position.x + 4.0 * sc, btn_r.position.y + 14.6 * sc), btn_txt, HORIZONTAL_ALIGNMENT_CENTER, bw - 8.0 * sc, int(9.8 * sc), Color.WHITE)
 
 func _draw_world_particles(frustum: Rect2) -> void:
 	var cull: Rect2 = frustum.grow(48.0)
@@ -563,12 +567,13 @@ class _WorldShowsFXLayer extends CanvasLayer:
 
 		_pointer_btn = Button.new()
 		_pointer_btn.visible = false
-		_pointer_btn.custom_minimum_size = Vector2(186, 40)
+		_pointer_btn.focus_mode = Control.FOCUS_NONE
+		_pointer_btn.custom_minimum_size = Vector2(192, 44)
 		var sb := StyleBoxFlat.new()
 		sb.bg_color = Color("2B8A3E")
 		sb.border_color = Color("FAF7EE")
 		sb.set_border_width_all(2)
-		sb.set_corner_radius_all(20)
+		sb.set_corner_radius_all(22)
 		sb.content_margin_left = 14
 		sb.content_margin_right = 14
 		_pointer_btn.add_theme_stylebox_override("normal", sb)
@@ -614,6 +619,20 @@ class _WorldShowsFXLayer extends CanvasLayer:
 			return
 
 		var vp: Vector2 = get_viewport().get_visible_rect().size
+		var pad_l: float = 16.0
+		var pad_r: float = 16.0
+		var pad_t: float = 68.0
+		var pad_b: float = 112.0 if vp.x < vp.y else 78.0
+		if OS.has_feature("mobile"):
+			var safe: Rect2i = DisplayServer.get_display_safe_area()
+			var win: Vector2i = DisplayServer.window_get_size()
+			if win.x > 0 and win.y > 0 and safe.size.x > 0:
+				var sx: float = vp.x / float(win.x)
+				var sy: float = vp.y / float(win.y)
+				pad_l = maxf(pad_l, float(safe.position.x) * sx + 8.0)
+				pad_r = maxf(pad_r, float(win.x - safe.end.x) * sx + 8.0)
+				pad_t = maxf(pad_t, float(safe.position.y) * sy + 60.0)
+				pad_b = maxf(pad_b, float(win.y - safe.end.y) * sy + (104.0 if vp.x < vp.y else 68.0))
 		var scr: Vector2 = owner_shows.camera.world_to_screen(gp)
 		var dir: Vector2 = (scr - vp * 0.5).normalized()
 		var arrow := "→"
@@ -626,8 +645,8 @@ class _WorldShowsFXLayer extends CanvasLayer:
 			String(gate.get("buttonText", "OPEN")),
 			arrow
 		]
-		var bx: float = clampf(scr.x - _pointer_btn.size.x * 0.5, 16.0, maxf(16.0, vp.x - _pointer_btn.size.x - 16.0))
-		var by: float = clampf(scr.y - _pointer_btn.size.y * 0.5, 68.0, maxf(68.0, vp.y - _pointer_btn.size.y - 78.0))
+		var bx: float = clampf(scr.x - _pointer_btn.size.x * 0.5, pad_l, maxf(pad_l, vp.x - _pointer_btn.size.x - pad_r))
+		var by: float = clampf(scr.y - _pointer_btn.size.y * 0.5, pad_t, maxf(pad_t, vp.y - _pointer_btn.size.y - pad_b))
 		_pointer_btn.position = Vector2(bx, by)
 		_pointer_btn.visible = true
 

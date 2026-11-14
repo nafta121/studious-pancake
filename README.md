@@ -1,19 +1,19 @@
-# Incremental Traffic: Karesidenan Madiun (Godot 4.7.2 Android Edition — v1.5.0)
+# Incremental Traffic: Karesidenan Madiun (Godot 4.7.2 Android Edition — v1.7.0)
 
-Simulasi rekayasa lalu lintas mikro-agen dan logistik rantai pasok **2.5D** menggunakan **Godot Engine 4.7.2 (`gl_compatibility` Mobile Renderer)** yang mengambil langsung **12 Berkas Shader Asli (`truck_part`, `truck_ghost`, `city_building`, `city_reveal`, `city_shadow`, `city_ground`, `road_verge`, `cloud_puff`, `rule_hints`, `water_ripples`, `leaning_roof`, `extrude_25d`), Vektor 44 Komoditas `ShapeGlyphs`, 5 Armada `TruckView` & `TruckInspector`, Pelataran Beton `FactoryLook` + `CargoFlights`, Rute OKHSL `RouteColors` + `RouteBreakMarks` + `Depot`, Arsitektur `Road Shape` (`1.68×` Lebar Truk) & Polilin Per-Lajur (`SimCore::set_lane`), Tema `"Sticker"`, Font, Ikon Vektor, Logo, dan 26 Efek Suara Asli *Incremental Traffic***, dipadukan dengan **alur jalan dunia nyata (OSRM / OpenStreetMap WGS84)** di seluruh **6 Kota & Kabupaten eks-Karesidenan Madiun, Jawa Timur**, serta optimalisasi penuh **60–120 FPS bebas kebocoran memori** untuk perangkat **Android**.
+Simulasi rekayasa lalu lintas mikro-agen dan logistik rantai pasok **2.5D** menggunakan **Godot Engine 4.7.2 (`gl_compatibility` Mobile Renderer)** yang mengambil langsung **12 Berkas Shader Asli (`truck_part`, `truck_ghost`, `city_building`, `city_reveal`, `city_shadow`, `city_ground`, `road_verge`, `cloud_puff`, `rule_hints`, `water_ripples`, `leaning_roof`, `extrude_25d`), Fisika Mikro `ParkingSpace` + `ExitRoads`, Kereta Api `TrainService` + Palang Perlintasan & Kapal `ShipService` + Jembatan Angkat *Bascule*, Alur Stage `TitleStage`/`SaveLoadMenu v4`/`RegionGate`, Vektor 44 Komoditas `ShapeGlyphs`, 5 Armada `TruckView` & `TruckInspector`, Arsitektur `Road Shape` (`1.68×` Lebar Truk) & Polilin Per-Lajur (`SimCore::set_lane`), Tema `"Sticker"`, Font, Ikon Vektor, Logo, dan Efek Suara Asli *Incremental Traffic***, dipadukan dengan **alur jalan dunia nyata (OSRM / OpenStreetMap WGS84)** di seluruh **6 Kota & Kabupaten eks-Karesidenan Madiun, Jawa Timur**, serta antarmuka sentuh Portrait/Landscape bebas overflow **60–120 FPS** untuk perangkat **Android**.
 
 ---
 
-## 📱 Unduh & Instalasi APK Android (`v1.5.0-madiun`)
+## 📱 Unduh & Instalasi APK Android (`v1.7.0-madiun`)
 
-File APK rilis yang telah ditandatangani secara kriptografis (**APK Signature Scheme v1 + v2 + v3**, arsitektur `arm64-v8a`) tersedia langsung di repositori ini:
+File APK rilis yang telah ditandatangani secara kriptografis (**APK Signature Scheme v2 + v3**, arsitektur `arm64-v8a`) tersedia langsung di repositori ini maupun pada halaman GitHub Releases:
 
-- **GitHub Releases**: [`v1.5.0-madiun`](https://github.com/nafta121/studious-pancake/releases/tag/v1.5.0-madiun) · Riwayat lengkap di [`CHANGELOG.md`](CHANGELOG.md)
-- **Lokasi File APK**: [`releases/incremental-traffic-madiun-android.apk`](releases/incremental-traffic-madiun-android.apk) (`26,9 MB` / `28.202.930 byte`)
+- **GitHub Releases**: [`v1.7.0-madiun`](https://github.com/nafta121/studious-pancake/releases/tag/v1.7.0-madiun) · Riwayat lengkap di [`CHANGELOG.md`](CHANGELOG.md)
+- **Lokasi File APK**: [`releases/incremental-traffic-madiun-android.apk`](releases/incremental-traffic-madiun-android.apk) (`27,1 MB` / `28.392.040 byte`, `212` entri terpaket)
 - **Package ID**: `id.madiun.incrementaltraffic`
-- **Versi**: `1.5.0-madiun` (`versionCode: 150` — mendukung *in-place update* langsung di atas `v1.1.0-madiun` – `v1.4.0-madiun` tanpa menghapus data simpanan)
+- **Versi**: `v1.7.0-madiun` (`versionCode: 170` — mendukung *in-place update* langsung di atas `v1.1.0-madiun` – `v1.6.0-madiun` tanpa menghapus data simpanan)
 - **Engine**: Godot Engine `4.7.2.stable` (Compiled GDScript Bytecode `.gdc`, GLES3 Mobile, `0` Script/Shader Error, `0` Leaked Resources)
-- **APK File SHA-256**: `612e154d65bfce1535f8f346939a373effddde8b201c8e96e1e13fee783373af`
+- **APK File SHA-256**: `43d4124fc6a0f5601e692506cc0705ba86433c7819a9a92d768d01788104f556`
 - **Signing Certificate Continuity** (`signing/madiun_godot_release.keystore`):
   - **Certificate Serial Number**: `5071a11bb51cc4dc`
   - **Certificate SHA-256 Digest**: `7bae8ba2a722a2168c38f3faaf0a3d61df57b32700cefdf2041fd59fbf4981ce`
@@ -21,11 +21,18 @@ File APK rilis yang telah ditandatangani secara kriptografis (**APK Signature Sc
   - **Validitas**: `2026-11-13` s/d `2054-03-31`
 
 ### Cara Memasang / Memperbarui (*Update*) di Perangkat Android:
-1. Unduh `incremental-traffic-madiun-android.apk` dari halaman [**GitHub Releases `v1.5.0-madiun`**](https://github.com/nafta121/studious-pancake/releases/tag/v1.5.0-madiun) atau [`releases/incremental-traffic-madiun-android.apk`](releases/incremental-traffic-madiun-android.apk), lalu pasang langsung di atas versi sebelumnya (tanpa *uninstall* agar progres `save_<map_id>.json` tetap tersimpan dan otomatis dimigrasikan ke skema `v: 3`), atau melalui ADB:
+1. Unduh `incremental-traffic-madiun-android.apk` dari halaman [**GitHub Releases `v1.7.0-madiun`**](https://github.com/nafta121/studious-pancake/releases/tag/v1.7.0-madiun) atau [`releases/incremental-traffic-madiun-android.apk`](releases/incremental-traffic-madiun-android.apk), lalu pasang langsung di atas versi sebelumnya (tanpa *uninstall* agar progres multi-slot `RunSave v: 4` tetap tersimpan), atau melalui ADB:
    ```bash
    adb install -r releases/incremental-traffic-madiun-android.apk
    ```
-2. Game mendukung **Auto-Rotation (Landscape `1152×648` & Portrait `480×960` DPI-adaptive)**, *edge-to-edge immersive mode*, kamera sentuh *2-finger pinch-zoom* + *inertial pan* + *double-tap zoom*, ketuk langsung truk di dunia untuk membuka `TruckInspector`, serta navigasi tombol fisik/gestur **Back** bawaan Android.
+2. Game mendukung **Auto-Rotation (Landscape `1152×648` & Portrait `480×960` bebas overflow)**, *edge-to-edge immersive mode* + *safe-area inset*, *touch-flick* mulus pada seluruh daftar scroll, *tap* area gelap/scrim untuk menutup modal, tombol jam ringkas (`☀ 09:00`) di bar bawah Portrait, dialog konfirmasi 2-langkah untuk aksi destruktif, serta stack navigasi tombol fisik/gestur **Android Back** terpadu.
+
+---
+
+## 📱 Pembaruan `v1.7.0` & `v1.6.0`: UI/UX Sentuh Android Presisi + 4 Pilar Inti *Incremental Traffic* `v1.4.1`
+
+- **UI/UX Sentuh, Scroll, Pop-up & Modal (`v1.7.0`)**: *Tap* area gelap/scrim langsung menutup modal dengan drift kamera `0,000 px`, *touch-flick* mulus langsung di atas tombol dalam seluruh `ScrollContainer`, tombol jam ringkas (`☀ 09:00`) tetap tampil pada bar bawah Portrait `480×960` dengan `0` overflow di 4 resolusi, grid `3×2` Lane Subbar Portrait, dialog konfirmasi aksi destruktif (`Retire`, `Reset Map`, `Ulangi Kota`, `Hapus Slot`), serta stack navigasi Android Back / `ESC` terpadu.
+- **4 Pilar Simulasi, Multimoda, Ekonomi & Stage (`v1.6.0`)**: Halaman parkir fisik `ParkingSpace` (`8` teluk) + `ExitRoads`, kereta api `TrainService` + palang perlintasan sebidang otomatis, kapal kargo `ShipService` + jembatan angkat *bascule*, kernel trapesium `MarketDemand` `105 dtk` + *Boomtown* 10-level, serta `TitleStage`, `LoadingRoundabout`, `SaveLoadMenu` atomik `RunSave v4`, `RegionGate`, dan mixer audio 5-kanal.
 
 ---
 

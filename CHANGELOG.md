@@ -4,19 +4,41 @@ Seluruh perubahan penting pada rilis APK Android (`id.madiun.incrementaltraffic`
 
 ## 🔐 Jaminan Kontinuitas Sertifikat Penandatanganan APK (*Signing Certificate Continuity*)
 
-Agar pengguna Android dapat melakukan **pembaruan langsung (*in-place update* / `adb install -r`)** tanpa perlu menghapus instalasi lama atau kehilangan data simpanan permainan (`user://save_<map_id>.json`), seluruh rilis mulai `v1.1.0-madiun`, `v1.2.0-madiun`, `v1.3.0-madiun`, `v1.4.0-madiun`, `v1.5.0-madiun`, hingga `v1.6.0-madiun` dan rilis-rilis berikutnya dikunci menggunakan *keystore* rilis tetap (`signing/madiun_godot_release.keystore`) dengan validasi otomatis pada [`scripts/build_android_apk.sh`](scripts/build_android_apk.sh):
+Agar pengguna Android dapat melakukan **pembaruan langsung (*in-place update* / `adb install -r`)** tanpa perlu menghapus instalasi lama atau kehilangan data simpanan permainan (`user://save_<map_id>.json`), seluruh rilis mulai `v1.1.0-madiun`, `v1.2.0-madiun`, `v1.3.0-madiun`, `v1.4.0-madiun`, `v1.5.0-madiun`, `v1.6.0-madiun`, hingga `v1.7.0-madiun` dan rilis-rilis berikutnya dikunci menggunakan *keystore* rilis tetap (`signing/madiun_godot_release.keystore`) dengan validasi otomatis pada [`scripts/build_android_apk.sh`](scripts/build_android_apk.sh):
 
 | Atribut Sertifikat | Nilai Terkunci |
 | :--- | :--- |
 | **Package Name** | `id.madiun.incrementaltraffic` |
-| **Keystore Alias** | `madiunrelease` (RSA-2048, APK Signature Scheme v1 + v2 + v3) |
+| **Keystore Alias** | `madiunrelease` (RSA-2048, APK Signature Scheme v2 + v3) |
 | **Subject / Issuer DN** | `CN=Incremental Traffic Karesidenan Madiun, OU=Mobile Game, O=Madiun Open GIS, L=Madiun, ST=Jawa Timur, C=ID` |
 | **Certificate Serial Number** | `5071a11bb51cc4dc` |
 | **Certificate SHA-256 Digest** | `7bae8ba2a722a2168c38f3faaf0a3d61df57b32700cefdf2041fd59fbf4981ce` |
 | **Certificate SHA-1 Digest** | `4a10248317724b7f363d92c9874c5c521ef98808` |
 | **Masa Berlaku** | `2026-11-13` s/d `2054-03-31` |
 
-> **Catatan Pembaruan**: Jika Anda sebelumnya memasang `v1.1.0-madiun` s/d `v1.5.0-madiun`, Anda dapat langsung mengunduh dan memasang `v1.6.0-madiun` di atasnya tanpa *uninstall* (skema simpanan lama `v: 2` / `v: 3` otomatis dimigrasikan ke multi-slot atomik `RunSave v: 4`).
+> **Catatan Pembaruan**: Jika Anda sebelumnya memasang `v1.1.0-madiun` s/d `v1.6.0-madiun`, Anda dapat langsung mengunduh dan memasang `v1.7.0-madiun` di atasnya tanpa *uninstall* (kompatibel penuh dengan simpanan multi-slot atomik `RunSave v: 4` beserta migrasi otomatis dari `v: 2` / `v: 3`).
+
+---
+
+## [`v1.7.0-madiun`] — `versionCode: 170`
+
+- **Berkas APK**: [`incremental-traffic-madiun-android.apk`](releases/incremental-traffic-madiun-android.apk) (`28.392.040 byte` / `27,1 MB`, `arm64-v8a`, Android 7.0+ `minSdk: 24`, `212` berkas terpaket)
+- **APK SHA-256**: `43d4124fc6a0f5601e692506cc0705ba86433c7819a9a92d768d01788104f556`
+- **Certificate Serial / SHA-256**: `5071a11bb51cc4dc` / `7bae8ba2a722a2168c38f3faaf0a3d61df57b32700cefdf2041fd59fbf4981ce` (identik dengan `v1.1.0-madiun` – `v1.6.0-madiun`)
+
+### 📱 Audit Menyeluruh & Perombakan UI/UX Sentuh, Scroll, Pop-up & Modal Android (`v1.7.0`)
+1. **Modal Scrim Interaktif & Gatekeeper Kamera Sentuh Presisi (`touch_camera.gd`, `android_hud.gd`, `stage_overlays.gd`, `main_game.gd`)**:
+   - **Tap Area Gelap/Scrim Langsung Menutup Modal**: Menambahkan backdrop gelap interaktif (`_modal_scrim` pada `AndroidHUD` serta handler scrim pada `StageOverlays`) yang langsung menutup modal (`Overview`, `PauseMenu`, `SaveLoadMenu`, `AudioOptions`, `RegionOpenPopup`, `ConfirmModal`) saat mengetuk area di luar kartu.
+   - **Drift Kamera `0,000 px` & Isolasi *Double-Tap Zoom***: `TouchCamera2D.ui_input_blocker` memblokir kebocoran geseran/cubitan ke kamera peta saat modal terbuka atau sentuhan dimulai di atas kontrol HUD (`0,000 px` drift), menolak `InputEventScreenDrag` dari jari yang tidak terdaftar di `_touches`, serta mengunci *double-tap zoom* hanya pada mode `pan` kosong agar ketukan cepat saat memegang tool jalan/simpang tidak memicu aksi ganda.
+2. **Touch-Flick `ScrollContainer` Mulus di Atas Tombol & Pelestarian Posisi Scroll (`android_hud.gd`, `stage_overlays.gd`)**:
+   - **Propagasi Sentuh Rekursif (`MOUSE_FILTER_PASS` / `IGNORE`)**: Seluruh `ScrollContainer` (`TitleStage -> New Game`, `SaveLoadMenu`, `RoadReroutePanel`, 5 tab `Overview`, `Contextual Inspector`, dan `Overlay Legend`) kini mengizinkan *touch-drag* yang dimulai tepat di atas tombol langsung menggulirkan daftar dengan mulus tanpa menghilangkan ketukan tombol.
+   - **Bilah Ubah-Nama Slot Terdedikasi & Proteksi Keyboard Virtual**: Memindahkan `LineEdit` keluar dari baris scroll `SaveLoadMenu` agar menggeser daftar slot tidak memunculkan keyboard virtual Android secara tak sengaja, membungkus `TitleStage` dalam `_title_scroll` dengan kompensasi `DisplayServer.virtual_keyboard_get_height()`, serta membersihkan kontainer dengan `remove_child` + pelestarian `scroll_vertical` bebas inflasi ukuran `autowrap_mode`.
+3. **Tata Letak Portrait `480×960` Bebas Overflow & Tombol Jam Ringkas (`android_hud.gd`, `stage_overlays.gd`)**:
+   - **Tombol Jam Ringkas (`☀ 09:00`) Tetap Tampil di Bar Bawah Portrait**: Mempertahankan `_clock_btn` (`74×44 px`) pada Baris 1 bar bawah Portrait berdampingan rapi dengan `[Overview][Trucks]` dan `[||][1x][2x][4x]` tanpa meluber di layar `480 px`, dilengkapi auto-dismiss `_day_popover` saat mengetuk area luar.
+   - **Grid `3×2` Lane Subbar, Kartu Responsif & `ScrollContainer` Anti-Clipping**: Mengubah `_lane_subbar` menjadi `GridContainer` responsif (`6×1` Landscape / `3×2` Portrait), membungkus aksi kartu rute dengan `HFlowContainer` + grid *Swap Model* `2` kolom, menyusun pemilih FPS `Options` secara vertikal di Portrait, serta membungkus `_overlay_card` dan seluruh rute terdampak di `RoadReroutePanel` dalam `ScrollContainer` dengan koordinasi z-order otomatis.
+4. **Stack Navigasi Android Back / `ESC`, Pembekuan `TitleStage` & Konfirmasi Aksi Destruktif (`main_game.gd`, `stage_overlays.gd`, `android_hud.gd`, `world_shows.gd`)**:
+   - **Stack Navigasi Back Terpadu & Jeda `TitleStage`**: Membekukan `sim.step_frame(delta)`, `_autosave_timer`, dan ekspor `camera_meta` selama `TitleStage` atau layar muat aktif (`dt = 0,0000 dtk`), serta menyatukan tombol fisik/gestur **Android Back** (`NOTIFICATION_WM_GO_BACK_REQUEST`) dan **`ESC`** ke dalam satu stack prioritas `handle_back_navigation()`.
+   - **Konfirmasi 2-Langkah, Safe-Area & Standar Sentuh `>= 40–46 px`**: Menambahkan modal konfirmasi sebelum menjalankan aksi destruktif (`Pensiunkan Rute / Retire`, `Reset Progress Peta`, `Ulangi Kota Ini $500`, `Hapus Slot Simpanan`), menerapkan inset `DisplayServer.get_display_safe_area()` pada seluruh layar & penunjuk gerbang wilayah (`192×44 px`), serta memperluas pill ketuk `RoadOfferSigns`.
 
 ---
 

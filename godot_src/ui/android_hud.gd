@@ -17,6 +17,7 @@ signal colorblind_toggled(on: bool)
 signal cloud_shadows_toggled(on: bool)
 signal focus_world_requested(world_pos: Vector2)
 signal pause_menu_requested()
+signal confirm_requested(title_txt: String, body_txt: String, confirm_lbl: String, on_confirm: Callable)
 
 var sim: SimEngine
 var map_view: MapView25D
@@ -36,6 +37,7 @@ var _root: Control
 
 # Zone 1: Top-Center MoneyDisplay Pill
 var _money_pill: PanelContainer
+var _money_row: HBoxContainer
 var _pause_btn: Button
 var _crest_widget: _CrestWidget
 var _town_btn: Button
@@ -59,6 +61,7 @@ var _goals_mini_btn: Button
 var _rule_vbox: VBoxContainer
 var _tool_btns: Dictionary = {}
 var _lane_subbar: PanelContainer
+var _lane_sub_grid: GridContainer
 var _lane_sub_btns: Dictionary = {}
 var _lane_dir_btn: Button
 
@@ -75,6 +78,7 @@ var _overlay_btns: Dictionary = {}
 var _overlay_card: PanelContainer
 var _overlay_card_title: Label
 var _overlay_card_desc: Label
+var _overlay_card_scroll: ScrollContainer
 var _overlay_card_body: VBoxContainer
 
 var _right_ctrl_row: HBoxContainer
@@ -104,7 +108,9 @@ var _fac_swap_route_id: String = ""
 var _fac_swap_target_model: String = "freighter"
 var _selected_light_phase: int = 0
 
-# Centered Wide Modal (Overview / Trucks / Alerts / Maps / Settings)
+# Centered Wide Modal (Overview / Trucks / Alerts / Maps / Settings) + Backdrop Scrim
+var _modal_scrim: ColorRect
+var _scrim_press_pos := Vector2(-9999.0, -9999.0)
 var _modal_panel: PanelContainer
 var _modal_title: Label
 var _modal_summary: Label
@@ -125,6 +131,114 @@ var _banner_timer: float = 0.0
 var _ui_refresh_timer: float = 0.0
 var _last_win_size := Vector2i.ZERO
 var _last_vp_size := Vector2.ZERO
+var _last_is_portrait: bool = false
+var _has_portrait_state: bool = false
+
+static func _make_scroll_touch_friendly(root_node: Node) -> void:
+	if root_node == null:
+		return
+	for ch in root_node.get_children():
+		if ch is Control and not (ch is ScrollContainer):
+			var c := ch as Control
+			if c is LineEdit or c is HSlider or c is VSlider or c is TabContainer:
+				pass
+			elif c is BaseButton or c is PanelContainer or c is BoxContainer or c is GridContainer or c is FlowContainer or c is MarginContainer:
+				c.mouse_filter = Control.MOUSE_FILTER_PASS
+			elif c is Label or c is ColorRect or c is ProgressBar or c is HSeparator or c is VSeparator or c is TextureRect:
+				c.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		_make_scroll_touch_friendly(ch)
+
+static func _clear_vbox_keep_scroll(vb: VBoxContainer) -> int:
+	if vb == null:
+		return 0
+	var sc := vb.get_parent() as ScrollContainer
+	var saved_v: int = sc.scroll_vertical if sc != null else 0
+	for i in range(vb.get_child_count() - 1, -1, -1):
+		var ch := vb.get_child(i)
+		vb.remove_child(ch)
+		ch.queue_free()
+	return saved_v
+
+static func _restore_scroll_deferred(vb: VBoxContainer, saved_v: int) -> void:
+	if vb == null or saved_v <= 0:
+		return
+	var sc := vb.get_parent() as ScrollContainer
+	if sc != null:
+		sc.set_deferred("scroll_vertical", saved_v)
+
+func is_modal_open() -> bool:
+	return _modal_panel != null and _modal_panel.visible
+
+func is_inspector_open() -> bool:
+	return _inspector_panel != null and _inspector_panel.visible
+
+func close_popovers() -> bool:
+	var closed_any: bool = false
+	if _day_popover != null and _day_popover.visible:
+		_day_popover.visible = false
+		closed_any = true
+	if map_view != null and map_view.overlay_mode != "none":
+		_toggle_overlay_mode(map_view.overlay_mode)
+		closed_any = true
+	return closed_any
+
+func is_screen_point_over_hud(pt: Vector2) -> bool:
+	if not visible or _root == null:
+		return false
+	if _modal_panel != null and _modal_panel.visible:
+		return true
+	for ctrl in [
+		_inspector_panel, _day_popover, _overlay_card,
+		_money_pill, _goals_card, _goals_mini_pill,
+		_rule_vbox, _lane_subbar, _bottom_left_row,
+		_right_ctrl_row, _bell_btn, _overlay_track, _route_hint_pill
+	]:
+		if ctrl != null and ctrl.visible and ctrl.get_global_rect().has_point(pt):
+			return true
+	return false
+
+func _request_confirm_or_run(title_txt: String, body_txt: String, confirm_lbl: String, action: Callable) -> void:
+	if confirm_requested.get_connections().is_empty():
+		action.call()
+	else:
+		confirm_requested.emit(title_txt, body_txt, confirm_lbl, action)
+
+func _input(event: InputEvent) -> void:
+	if not visible or _day_popover == null or not _day_popover.visible:
+		return
+	if event is InputEventScreenTouch:
+		var st := event as InputEventScreenTouch
+		if st.pressed and not _day_popover.get_global_rect().has_point(st.position) and (_clock_btn == null or not _clock_btn.get_global_rect().has_point(st.position)):
+			_day_popover.visible = false
+	elif event is InputEventMouseButton:
+		var mb := event as InputEventMouseButton
+		if mb.pressed and mb.button_index == MOUSE_BUTTON_LEFT and not _day_popover.get_global_rect().has_point(mb.position) and (_clock_btn == null or not _clock_btn.get_global_rect().has_point(mb.position)):
+			_day_popover.visible = false
+
+func _on_hud_modal_scrim_input(event: InputEvent) -> void:
+	if _modal_panel == null or not _modal_panel.visible:
+		return
+	if event is InputEventScreenTouch:
+		_modal_scrim.accept_event()
+		var st := event as InputEventScreenTouch
+		if st.pressed:
+			_scrim_press_pos = st.position
+		elif st.position.distance_to(_scrim_press_pos) <= 22.0:
+			_scrim_press_pos = Vector2(-9999.0, -9999.0)
+			if not _modal_panel.get_global_rect().has_point(st.position):
+				close_drawer()
+	elif event is InputEventScreenDrag or event is InputEventMouseMotion:
+		_modal_scrim.accept_event()
+	elif event is InputEventMouseButton:
+		_modal_scrim.accept_event()
+		var mb := event as InputEventMouseButton
+		if mb.button_index == MOUSE_BUTTON_LEFT:
+			if mb.pressed:
+				_scrim_press_pos = mb.position
+			elif mb.position.distance_to(_scrim_press_pos) <= 22.0:
+				_scrim_press_pos = Vector2(-9999.0, -9999.0)
+				if not _modal_panel.get_global_rect().has_point(mb.position):
+					close_drawer()
 
 func _exit_tree() -> void:
 	if _root != null and is_instance_valid(_root):
@@ -174,51 +288,59 @@ func _build_shell() -> void:
 
 	# === ZONE 1: TOP-CENTER MONEY DISPLAY PILL ===
 	_money_pill = PanelContainer.new()
+	_money_pill.mouse_filter = Control.MOUSE_FILTER_STOP
 	_root.add_child(_money_pill)
 
-	var money_row := HBoxContainer.new()
-	money_row.add_theme_constant_override("separation", 8)
-	money_row.alignment = BoxContainer.ALIGNMENT_CENTER
-	_money_pill.add_child(money_row)
+	_money_row = HBoxContainer.new()
+	_money_row.add_theme_constant_override("separation", 8)
+	_money_row.alignment = BoxContainer.ALIGNMENT_CENTER
+	_money_pill.add_child(_money_row)
 
 	_pause_btn = Button.new()
 	_pause_btn.theme_type_variation = &"QuietButton"
 	_pause_btn.focus_mode = Control.FOCUS_NONE
 	_pause_btn.text = "☰"
-	_pause_btn.custom_minimum_size = Vector2(30, 28)
+	_pause_btn.custom_minimum_size = Vector2(40, 40)
 	_pause_btn.pressed.connect(func(): pause_menu_requested.emit())
-	money_row.add_child(_pause_btn)
+	_money_row.add_child(_pause_btn)
 
 	_crest_widget = _CrestWidget.new()
+	_crest_widget.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	_crest_widget.custom_minimum_size = Vector2(22, 26)
-	money_row.add_child(_crest_widget)
+	_money_row.add_child(_crest_widget)
 
 	_town_btn = Button.new()
 	_town_btn.theme_type_variation = &"QuietButton"
 	_town_btn.focus_mode = Control.FOCUS_NONE
+	_town_btn.custom_minimum_size = Vector2(72, 40)
+	_town_btn.text_overrun_behavior = TextServer.OVERRUN_TRIM_ELLIPSIS
 	_town_btn.text = "Karesidenan Madiun ▾"
 	_town_btn.pressed.connect(func(): open_drawer("maps"))
-	money_row.add_child(_town_btn)
+	_money_row.add_child(_town_btn)
 
 	var vsep := VSeparator.new()
-	money_row.add_child(vsep)
+	vsep.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_money_row.add_child(vsep)
 
 	_cash_btn = Button.new()
 	_cash_btn.flat = true
 	_cash_btn.focus_mode = Control.FOCUS_NONE
+	_cash_btn.custom_minimum_size = Vector2(0, 40)
 	_cash_btn.add_theme_font_size_override("font_size", 22)
 	_cash_btn.text = "$500"
 	_cash_btn.pressed.connect(func(): open_drawer("routes"))
-	money_row.add_child(_cash_btn)
+	_money_row.add_child(_cash_btn)
 
 	_profit_lbl = Label.new()
 	_profit_lbl.theme_type_variation = &"MonoLabel"
+	_profit_lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	_profit_lbl.text = "▲ +$0 / min"
-	money_row.add_child(_profit_lbl)
+	_money_row.add_child(_profit_lbl)
 
 	# === ZONE 2: TOP-RIGHT GOALS PANEL & MINI PILL ===
 	_goals_card = PanelContainer.new()
 	_goals_card.theme_type_variation = &"WindowPanel"
+	_goals_card.mouse_filter = Control.MOUSE_FILTER_STOP
 	_root.add_child(_goals_card)
 
 	var g_col := VBoxContainer.new()
@@ -253,7 +375,7 @@ func _build_shell() -> void:
 	collapse_btn.theme_type_variation = &"QuietButton"
 	collapse_btn.focus_mode = Control.FOCUS_NONE
 	collapse_btn.text = "−"
-	collapse_btn.custom_minimum_size = Vector2(28, 26)
+	collapse_btn.custom_minimum_size = Vector2(40, 38)
 	collapse_btn.pressed.connect(func():
 		_goals_collapsed = true
 		_layout_responsive()
@@ -281,7 +403,7 @@ func _build_shell() -> void:
 	_goals_open_btn = Button.new()
 	_goals_open_btn.theme_type_variation = &"PrimaryButton"
 	_goals_open_btn.focus_mode = Control.FOCUS_NONE
-	_goals_open_btn.custom_minimum_size = Vector2(0, 34)
+	_goals_open_btn.custom_minimum_size = Vector2(0, 42)
 	_goals_open_btn.visible = false
 	_goals_open_btn.text = "🔓 OPEN REGION!"
 	_goals_open_btn.pressed.connect(func():
@@ -293,6 +415,7 @@ func _build_shell() -> void:
 
 	# Mini pill when collapsed or in Portrait mode
 	_goals_mini_pill = PanelContainer.new()
+	_goals_mini_pill.mouse_filter = Control.MOUSE_FILTER_STOP
 	_goals_mini_pill.visible = false
 	_root.add_child(_goals_mini_pill)
 
@@ -301,12 +424,14 @@ func _build_shell() -> void:
 	_goals_mini_pill.add_child(gm_row)
 
 	_goals_mini_ring = _MiniGoalRingWidget.new()
+	_goals_mini_ring.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	_goals_mini_ring.custom_minimum_size = Vector2(22, 22)
 	gm_row.add_child(_goals_mini_ring)
 
 	_goals_mini_btn = Button.new()
 	_goals_mini_btn.theme_type_variation = &"QuietButton"
 	_goals_mini_btn.focus_mode = Control.FOCUS_NONE
+	_goals_mini_btn.custom_minimum_size = Vector2(0, 38)
 	_goals_mini_btn.text = "Region 2 ▾"
 	_goals_mini_btn.pressed.connect(func():
 		var vp := get_viewport().get_visible_rect().size
@@ -345,20 +470,24 @@ func _build_shell() -> void:
 		face.tool_id = tid
 		face.caption = tlbl
 		face.font_ref = _ui_font
+		face.mouse_filter = Control.MOUSE_FILTER_IGNORE
 		face.set_anchors_preset(Control.PRESET_FULL_RECT)
 		tb.add_child(face)
 		_tool_btns[tid] = tb
 		_rule_vbox.add_child(tb)
 
-	# Floating Lane Mode Subbar when Lanes is active
+	# Floating Lane Mode Subbar when Lanes is active (6x1 in Landscape, 3x2 in Portrait so 0 overflow)
 	_lane_subbar = PanelContainer.new()
 	_lane_subbar.theme_type_variation = &"SegmentTrack"
+	_lane_subbar.mouse_filter = Control.MOUSE_FILTER_STOP
 	_lane_subbar.visible = false
 	_root.add_child(_lane_subbar)
 
-	var lsub_row := HBoxContainer.new()
-	lsub_row.add_theme_constant_override("separation", 3)
-	_lane_subbar.add_child(lsub_row)
+	_lane_sub_grid = GridContainer.new()
+	_lane_sub_grid.columns = 6
+	_lane_sub_grid.add_theme_constant_override("h_separation", 3)
+	_lane_sub_grid.add_theme_constant_override("v_separation", 3)
+	_lane_subbar.add_child(_lane_sub_grid)
 
 	for lspec in [
 		["lanes_add", "+ Lane"],
@@ -372,21 +501,23 @@ func _build_shell() -> void:
 		sb.theme_type_variation = &"SegmentButton"
 		sb.toggle_mode = true
 		sb.focus_mode = Control.FOCUS_NONE
+		sb.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 		sb.text = String(lspec[1])
-		sb.custom_minimum_size = Vector2(0, 36)
+		sb.custom_minimum_size = Vector2(0, 40)
 		sb.pressed.connect(func():
 			map_view.active_tool = lid
 			_sync_tool_highlights()
 			tool_changed.emit(lid)
 		)
 		_lane_sub_btns[lid] = sb
-		lsub_row.add_child(sb)
+		_lane_sub_grid.add_child(sb)
 
 	_lane_dir_btn = Button.new()
 	_lane_dir_btn.theme_type_variation = &"SegmentButton"
 	_lane_dir_btn.focus_mode = Control.FOCUS_NONE
+	_lane_dir_btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	_lane_dir_btn.text = "Dir: Both"
-	_lane_dir_btn.custom_minimum_size = Vector2(0, 36)
+	_lane_dir_btn.custom_minimum_size = Vector2(0, 40)
 	_lane_dir_btn.pressed.connect(func():
 		if lane_dir_mode == "both":
 			lane_dir_mode = "forward"
@@ -398,7 +529,7 @@ func _build_shell() -> void:
 			lane_dir_mode = "both"
 			_lane_dir_btn.text = "Dir: Both"
 	)
-	lsub_row.add_child(_lane_dir_btn)
+	_lane_sub_grid.add_child(_lane_dir_btn)
 
 	# === ZONE 4: BOTTOM-LEFT PRIMARY BUTTONS (Overview & Trucks) ===
 	_bottom_left_row = HBoxContainer.new()
@@ -433,6 +564,7 @@ func _build_shell() -> void:
 
 	# Route tap-to-connect helper pill
 	_route_hint_pill = PanelContainer.new()
+	_route_hint_pill.mouse_filter = Control.MOUSE_FILTER_STOP
 	_route_hint_pill.visible = false
 	_root.add_child(_route_hint_pill)
 
@@ -442,11 +574,14 @@ func _build_shell() -> void:
 
 	_route_hint_lbl = Label.new()
 	_route_hint_lbl.text = "Tap destination building to open route"
+	_route_hint_lbl.clip_text = true
+	_route_hint_lbl.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	rh_row.add_child(_route_hint_lbl)
 
 	var rh_cancel := Button.new()
 	rh_cancel.theme_type_variation = &"QuietButton"
 	rh_cancel.focus_mode = Control.FOCUS_NONE
+	rh_cancel.custom_minimum_size = Vector2(0, 38)
 	rh_cancel.text = "Cancel"
 	rh_cancel.pressed.connect(func(): _on_toolbar_pressed("pan"))
 	rh_row.add_child(rh_cancel)
@@ -454,6 +589,7 @@ func _build_shell() -> void:
 	# === ZONE 5: BOTTOM-RIGHT OVERLAY BAR + BELL + DAY CLOCK + SPEED CONTROLS ===
 	_overlay_track = PanelContainer.new()
 	_overlay_track.theme_type_variation = &"SegmentTrack"
+	_overlay_track.mouse_filter = Control.MOUSE_FILTER_STOP
 	_root.add_child(_overlay_track)
 
 	var ov_row := HBoxContainer.new()
@@ -466,10 +602,11 @@ func _build_shell() -> void:
 		ob.theme_type_variation = &"SegmentButton"
 		ob.toggle_mode = true
 		ob.focus_mode = Control.FOCUS_NONE
-		ob.custom_minimum_size = Vector2(38, 38)
+		ob.custom_minimum_size = Vector2(40, 40)
 		ob.pressed.connect(func(): _toggle_overlay_mode(m_id))
 		var ic := _OverlayIconFace.new()
 		ic.mode_id = m_id
+		ic.mouse_filter = Control.MOUSE_FILTER_IGNORE
 		ic.set_anchors_preset(Control.PRESET_FULL_RECT)
 		ob.add_child(ic)
 		_overlay_btns[m_id] = ob
@@ -477,8 +614,9 @@ func _build_shell() -> void:
 
 	_overlay_card = PanelContainer.new()
 	_overlay_card.theme_type_variation = &"WindowPanel"
+	_overlay_card.mouse_filter = Control.MOUSE_FILTER_STOP
 	_overlay_card.visible = false
-	_overlay_card.custom_minimum_size = Vector2(270, 0)
+	_overlay_card.custom_minimum_size = Vector2(260, 0)
 	_root.add_child(_overlay_card)
 
 	var ovc_col := VBoxContainer.new()
@@ -486,15 +624,18 @@ func _build_shell() -> void:
 	_overlay_card.add_child(ovc_col)
 
 	var ovc_head := HBoxContainer.new()
+	ovc_head.add_theme_constant_override("separation", 6)
 	ovc_col.add_child(ovc_head)
 	_overlay_card_title = Label.new()
 	_overlay_card_title.theme_type_variation = &"CardTitleLabel"
 	_overlay_card_title.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_overlay_card_title.clip_text = true
 	ovc_head.add_child(_overlay_card_title)
 
 	var ovc_close := Button.new()
 	ovc_close.theme_type_variation = &"QuietButton"
 	ovc_close.focus_mode = Control.FOCUS_NONE
+	ovc_close.custom_minimum_size = Vector2(40, 38)
 	ovc_close.text = "×"
 	ovc_close.pressed.connect(func(): _toggle_overlay_mode(map_view.overlay_mode))
 	ovc_head.add_child(ovc_close)
@@ -502,18 +643,21 @@ func _build_shell() -> void:
 	_overlay_card_desc = Label.new()
 	_overlay_card_desc.theme_type_variation = &"CaptionLabel"
 	_overlay_card_desc.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-	_overlay_card_desc.custom_minimum_size = Vector2(238, 0)
+	_overlay_card_desc.custom_minimum_size = Vector2(220, 0)
 	ovc_col.add_child(_overlay_card_desc)
 
+	_overlay_card_scroll = ScrollContainer.new()
+	_overlay_card_scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
+	_overlay_card_scroll.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_overlay_card_scroll.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	ovc_col.add_child(_overlay_card_scroll)
+
 	_overlay_card_body = VBoxContainer.new()
+	_overlay_card_body.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	_overlay_card_body.add_theme_constant_override("separation", 4)
-	ovc_col.add_child(_overlay_card_body)
+	_overlay_card_scroll.add_child(_overlay_card_body)
 
-	# Right Control Row: Bell/Options + DayClock + Speed Pills
-	_right_ctrl_row = HBoxContainer.new()
-	_right_ctrl_row.add_theme_constant_override("separation", 6)
-	_root.add_child(_right_ctrl_row)
-
+	# Bell / Alerts & Options Button (direct child of _root so Landscape puts it inline & Portrait puts it on Row 2 next to OverlayBar)
 	_bell_btn = Button.new()
 	_bell_btn.theme_type_variation = &"ToolButton"
 	_bell_btn.focus_mode = Control.FOCUS_NONE
@@ -528,9 +672,15 @@ func _build_shell() -> void:
 			open_drawer("settings")
 	)
 	_bell_icon = _BellWidget.new()
+	_bell_icon.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	_bell_icon.set_anchors_preset(Control.PRESET_FULL_RECT)
 	_bell_btn.add_child(_bell_icon)
-	_right_ctrl_row.add_child(_bell_btn)
+	_root.add_child(_bell_btn)
+
+	# Right Control Row: Compact DayClock + Speed Pills (visible in BOTH Landscape and Portrait!)
+	_right_ctrl_row = HBoxContainer.new()
+	_right_ctrl_row.add_theme_constant_override("separation", 6)
+	_root.add_child(_right_ctrl_row)
 
 	_clock_btn = Button.new()
 	_clock_btn.theme_type_variation = &"ToolButton"
@@ -538,18 +688,24 @@ func _build_shell() -> void:
 	_clock_btn.custom_minimum_size = Vector2(88, 46)
 	_clock_btn.pressed.connect(func():
 		_day_popover.visible = not _day_popover.visible
+		if _day_popover.visible and map_view != null and map_view.overlay_mode != "none":
+			map_view.overlay_mode = "none"
+			overlay_changed.emit("none")
+			_sync_overlay_bar()
 		if sim.sfx:
 			sim.sfx.play_ui("panel_open" if _day_popover.visible else "panel_close")
+		_layout_responsive()
 	)
 	var clk_face := HBoxContainer.new()
 	clk_face.set_anchors_preset(Control.PRESET_FULL_RECT)
 	clk_face.alignment = BoxContainer.ALIGNMENT_CENTER
-	clk_face.add_theme_constant_override("separation", 5)
+	clk_face.add_theme_constant_override("separation", 4)
 	clk_face.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	_clock_btn.add_child(clk_face)
 
 	_clock_icon = _SunMoonWidget.new()
-	_clock_icon.custom_minimum_size = Vector2(18, 18)
+	_clock_icon.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_clock_icon.custom_minimum_size = Vector2(16, 16)
 	clk_face.add_child(_clock_icon)
 
 	_clock_lbl = Label.new()
@@ -574,8 +730,9 @@ func _build_shell() -> void:
 	# Day & Night Popover Card (DayClock._panel)
 	_day_popover = PanelContainer.new()
 	_day_popover.theme_type_variation = &"WindowPanel"
+	_day_popover.mouse_filter = Control.MOUSE_FILTER_STOP
 	_day_popover.visible = false
-	_day_popover.custom_minimum_size = Vector2(280, 0)
+	_day_popover.custom_minimum_size = Vector2(268, 0)
 	_root.add_child(_day_popover)
 
 	var dp_col := VBoxContainer.new()
@@ -592,6 +749,7 @@ func _build_shell() -> void:
 	var dp_close := Button.new()
 	dp_close.theme_type_variation = &"QuietButton"
 	dp_close.focus_mode = Control.FOCUS_NONE
+	dp_close.custom_minimum_size = Vector2(40, 38)
 	dp_close.text = "×"
 	dp_close.pressed.connect(func(): _day_popover.visible = false)
 	dp_head.add_child(dp_close)
@@ -612,6 +770,7 @@ func _build_shell() -> void:
 	_day_slider.max_value = 24.0
 	_day_slider.step = 0.25
 	_day_slider.value = 9.0
+	_day_slider.custom_minimum_size = Vector2(0, 36)
 	_day_slider.value_changed.connect(func(v: float):
 		sim.day_clock_01 = fposmod(v / 24.0, 1.0)
 		sim.night_mode = (v < 5.3 or v > 18.8)
@@ -622,12 +781,16 @@ func _build_shell() -> void:
 
 	_day_run_chk = CheckBox.new()
 	_day_run_chk.focus_mode = Control.FOCUS_NONE
+	_day_run_chk.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	_day_run_chk.custom_minimum_size = Vector2(0, 40)
 	_day_run_chk.text = "Time passes automatically"
 	_day_run_chk.toggled.connect(func(on: bool): sim.auto_day_night = on)
 	dp_col.add_child(_day_run_chk)
 
 	_day_dark_chk = CheckBox.new()
 	_day_dark_chk.focus_mode = Control.FOCUS_NONE
+	_day_dark_chk.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	_day_dark_chk.custom_minimum_size = Vector2(0, 40)
 	_day_dark_chk.text = "Dark Sticker UI theme"
 	_day_dark_chk.toggled.connect(func(on: bool):
 		dark_mode = on
@@ -639,6 +802,7 @@ func _build_shell() -> void:
 	# === LEFT-DOCKED CONTEXTUAL INSPECTOR (FactoryPanel / Junction / Road / Offers) ===
 	_inspector_panel = PanelContainer.new()
 	_inspector_panel.theme_type_variation = &"WindowPanel"
+	_inspector_panel.mouse_filter = Control.MOUSE_FILTER_STOP
 	_inspector_panel.visible = false
 	_root.add_child(_inspector_panel)
 
@@ -667,12 +831,14 @@ func _build_shell() -> void:
 	ins_close.theme_type_variation = &"ToolButton"
 	ins_close.focus_mode = Control.FOCUS_NONE
 	ins_close.text = "×"
-	ins_close.custom_minimum_size = Vector2(36, 36)
+	ins_close.custom_minimum_size = Vector2(42, 42)
 	ins_close.pressed.connect(func(): close_drawer())
 	ins_head.add_child(ins_close)
 
 	_inspector_sub = Label.new()
 	_inspector_sub.theme_type_variation = &"CaptionLabel"
+	_inspector_sub.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_inspector_sub.custom_minimum_size = Vector2(200, 0)
 	_inspector_sub.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	ins_col.add_child(_inspector_sub)
 
@@ -686,9 +852,18 @@ func _build_shell() -> void:
 	_inspector_body.add_theme_constant_override("separation", 8)
 	_inspector_scroll.add_child(_inspector_body)
 
-	# === CENTERED WIDE OVERVIEW MODAL (Overview / Trucks / Maps / Options) ===
+	# === CENTERED WIDE OVERVIEW MODAL + DARK SCRIM (Tap outside closes modal, blocks map pan) ===
+	_modal_scrim = ColorRect.new()
+	_modal_scrim.visible = false
+	_modal_scrim.mouse_filter = Control.MOUSE_FILTER_STOP
+	_modal_scrim.color = Color(0.08, 0.10, 0.14, 0.54)
+	_modal_scrim.set_anchors_preset(Control.PRESET_FULL_RECT)
+	_modal_scrim.gui_input.connect(_on_hud_modal_scrim_input)
+	_root.add_child(_modal_scrim)
+
 	_modal_panel = PanelContainer.new()
 	_modal_panel.theme_type_variation = &"WindowPanel"
+	_modal_panel.mouse_filter = Control.MOUSE_FILTER_STOP
 	_modal_panel.visible = false
 	_root.add_child(_modal_panel)
 
@@ -702,6 +877,8 @@ func _build_shell() -> void:
 
 	_modal_title = Label.new()
 	_modal_title.theme_type_variation = &"HeaderLabel"
+	_modal_title.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_modal_title.clip_text = true
 	_modal_title.text = "Overview"
 	mod_head.add_child(_modal_title)
 
@@ -718,12 +895,13 @@ func _build_shell() -> void:
 	mod_close.theme_type_variation = &"ToolButton"
 	mod_close.focus_mode = Control.FOCUS_NONE
 	mod_close.text = "×"
-	mod_close.custom_minimum_size = Vector2(36, 36)
+	mod_close.custom_minimum_size = Vector2(42, 42)
 	mod_close.pressed.connect(func(): close_drawer())
 	mod_head.add_child(mod_close)
 
 	_modal_graph = _CashGraphWidget.new()
 	_modal_graph.font_ref = _ui_font
+	_modal_graph.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	_modal_graph.custom_minimum_size = Vector2(0, 92)
 	mod_col.add_child(_modal_graph)
 
@@ -758,7 +936,11 @@ func _build_shell() -> void:
 	_root.add_child(_banner_panel)
 
 	_banner_label = Label.new()
+	_banner_label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_banner_label.custom_minimum_size = Vector2(180, 0)
 	_banner_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	_banner_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	_banner_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	_banner_panel.add_child(_banner_label)
 
 	_sync_tool_highlights()
@@ -823,24 +1005,31 @@ func _layout_responsive() -> void:
 			pad_b = maxf(12.0, float(win.y - safe.end.y) * sy)
 
 	var is_portrait: bool = vp.x < vp.y
+	var portrait_changed: bool = (not _has_portrait_state) or (_last_is_portrait != is_portrait)
+	_has_portrait_state = true
+	_last_is_portrait = is_portrait
 
-	# 1. Top-Center MoneyDisplay
+	if portrait_changed and sim != null:
+		_update_top_bar_labels(is_portrait)
+
+	# 1. Top-Center MoneyDisplay (safe Portrait clipping + actual height propagation)
+	_money_row.add_theme_constant_override("separation", 5 if is_portrait else 8)
+	_town_btn.clip_text = is_portrait
+	_town_btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL if is_portrait else Control.SIZE_FILL
+	_cash_btn.add_theme_font_size_override("font_size", 18 if is_portrait else 22)
+	_profit_lbl.add_theme_font_size_override("font_size", 12 if is_portrait else 14)
+
 	_money_pill.reset_size()
 	var mp_sz: Vector2 = _money_pill.get_combined_minimum_size()
-	mp_sz.x = clampf(mp_sz.x, 280.0, vp.x - pad_l - pad_r)
-	mp_sz.y = maxf(46.0, mp_sz.y)
+	mp_sz.y = maxf(48.0, mp_sz.y)
 	if is_portrait:
+		var mp_w: float = maxf(260.0, vp.x - pad_l - pad_r)
 		_money_pill.position = Vector2(pad_l, pad_t)
-		_money_pill.size = Vector2(vp.x - pad_l - pad_r, 46.0)
+		_money_pill.size = Vector2(mp_w, mp_sz.y)
 	else:
+		mp_sz.x = clampf(mp_sz.x, 280.0, vp.x - pad_l - pad_r)
 		_money_pill.position = Vector2((vp.x - mp_sz.x) * 0.5, pad_t)
 		_money_pill.size = mp_sz
-
-	# Route hint pill right under MoneyDisplay
-	_route_hint_pill.reset_size()
-	var rh_sz: Vector2 = _route_hint_pill.get_combined_minimum_size()
-	_route_hint_pill.position = Vector2((vp.x - rh_sz.x) * 0.5, _money_pill.position.y + _money_pill.size.y + 6.0)
-	_route_hint_pill.size = rh_sz
 
 	# 2. Top-Right GoalsPanel vs Mini Pill
 	if is_portrait:
@@ -848,6 +1037,7 @@ func _layout_responsive() -> void:
 		_goals_mini_pill.visible = true
 		_goals_mini_pill.reset_size()
 		var gm_sz := _goals_mini_pill.get_combined_minimum_size()
+		gm_sz.x = minf(gm_sz.x, vp.x - pad_l - pad_r)
 		_goals_mini_pill.position = Vector2(vp.x - pad_r - gm_sz.x, _money_pill.position.y + _money_pill.size.y + 6.0)
 		_goals_mini_pill.size = gm_sz
 	else:
@@ -871,7 +1061,17 @@ func _layout_responsive() -> void:
 		_money_pill.size = mp_sz
 		_money_pill.position = Vector2(maxf(pad_l, minf((vp.x - mp_sz.x) * 0.5, right_limit_x - mp_sz.x)), pad_t)
 
-	# 3. Left-Center Vertical RuleToolbar
+	# Route hint pill right under MoneyDisplay (clamped strictly to viewport width)
+	var max_rh_w: float = vp.x - pad_l - pad_r
+	_route_hint_pill.custom_minimum_size = Vector2(minf(300.0, max_rh_w), 0)
+	_route_hint_pill.reset_size()
+	var rh_sz: Vector2 = _route_hint_pill.get_combined_minimum_size()
+	rh_sz.x = minf(rh_sz.x, max_rh_w)
+	var rh_y: float = (_goals_mini_pill.position.y + _goals_mini_pill.size.y + 6.0) if (is_portrait and _goals_mini_pill.visible) else (_money_pill.position.y + _money_pill.size.y + 6.0)
+	_route_hint_pill.position = Vector2((vp.x - rh_sz.x) * 0.5, rh_y)
+	_route_hint_pill.size = rh_sz
+
+	# 3. Left-Center Vertical RuleToolbar + Bounded Lane Subbar
 	for k in _tool_btns.keys():
 		var tb: Button = _tool_btns[k]
 		tb.custom_minimum_size = Vector2(58, 48) if is_portrait else Vector2(72, 56)
@@ -885,67 +1085,113 @@ func _layout_responsive() -> void:
 		_rule_vbox.position = Vector2(pad_l, maxf(pad_t + 54.0, (vp.y - rv_sz.y) * 0.5 - 12.0))
 	_rule_vbox.size = rv_sz
 
+	_lane_sub_grid.columns = 3 if is_portrait else 6
 	_lane_subbar.reset_size()
 	var ls_sz := _lane_subbar.get_combined_minimum_size()
-	_lane_subbar.position = Vector2(_rule_vbox.position.x + rv_sz.x + 8.0, _rule_vbox.position.y + 110.0)
+	var ls_x: float = _rule_vbox.position.x + rv_sz.x + 8.0
+	ls_sz.x = minf(ls_sz.x, maxf(180.0, vp.x - pad_r - ls_x))
+	var ls_clamped_x: float = clampf(ls_x, pad_l, maxf(pad_l, vp.x - pad_r - ls_sz.x))
+	var ls_y: float = clampf(_rule_vbox.position.y + (92.0 if is_portrait else 110.0), pad_t + 56.0, maxf(pad_t + 56.0, vp.y - pad_b - ls_sz.y - 60.0))
+	_lane_subbar.position = Vector2(ls_clamped_x, ls_y)
 	_lane_subbar.size = ls_sz
 
-	# 4 & 5. Bottom-Left (Overview/Trucks) & Bottom-Right (OverlayBar + DayClock + SpeedControls)
-	_overview_btn.custom_minimum_size = Vector2(82, 42) if is_portrait else Vector2(104, 46)
-	_trucks_btn.custom_minimum_size = Vector2(72, 42) if is_portrait else Vector2(88, 46)
+	# 4 & 5. Bottom-Left (Overview/Trucks) & Bottom-Right (Compact DayClock + SpeedControls + Row-2 OverlayBar/Bell in Portrait)
+	_bottom_left_row.add_theme_constant_override("separation", 6 if is_portrait else 8)
+	_overview_btn.custom_minimum_size = Vector2(78, 44) if is_portrait else Vector2(104, 46)
+	_trucks_btn.custom_minimum_size = Vector2(68, 44) if is_portrait else Vector2(88, 46)
+	_overview_btn.add_theme_font_size_override("font_size", 14 if is_portrait else 16)
+	_trucks_btn.add_theme_font_size_override("font_size", 14 if is_portrait else 16)
 	_bottom_left_row.reset_size()
 	var bl_sz := _bottom_left_row.get_combined_minimum_size()
 	_bottom_left_row.position = Vector2(pad_l, vp.y - pad_b - bl_sz.y)
 	_bottom_left_row.size = bl_sz
 
-	_clock_btn.visible = not is_portrait
+	# User Pref #2: Keep compact DayClock button visible on BOTH Landscape and Portrait bottom bars!
+	_clock_btn.visible = true
+	_clock_btn.custom_minimum_size = Vector2(74, 44) if is_portrait else Vector2(88, 46)
+	_clock_icon.custom_minimum_size = Vector2(14, 14) if is_portrait else Vector2(18, 18)
+	_clock_lbl.add_theme_font_size_override("font_size", 12 if is_portrait else 14)
+	_right_ctrl_row.add_theme_constant_override("separation", 4 if is_portrait else 6)
 	for sp_k in _speed_btns.keys():
-		(_speed_btns[sp_k] as Button).custom_minimum_size = Vector2(38, 42) if is_portrait else Vector2(44, 46)
-	_bell_btn.custom_minimum_size = Vector2(40, 42) if is_portrait else Vector2(44, 46)
+		var sp_b := _speed_btns[sp_k] as Button
+		sp_b.custom_minimum_size = Vector2(38, 44) if is_portrait else Vector2(44, 46)
+		sp_b.add_theme_font_size_override("font_size", 13 if is_portrait else 15)
 
 	_right_ctrl_row.reset_size()
 	var rc_sz := _right_ctrl_row.get_combined_minimum_size()
-	_right_ctrl_row.position = Vector2(vp.x - pad_r - rc_sz.x - 4.0, vp.y - pad_b - rc_sz.y)
+	var rc_x: float = (vp.x - pad_r - rc_sz.x) if is_portrait else (vp.x - pad_r - rc_sz.x - 4.0)
+	_right_ctrl_row.position = Vector2(rc_x, vp.y - pad_b - rc_sz.y)
 	_right_ctrl_row.size = rc_sz
 
+	for ov_k in _overlay_btns.keys():
+		(_overlay_btns[ov_k] as Button).custom_minimum_size = Vector2(40, 40) if is_portrait else Vector2(42, 42)
 	_overlay_track.reset_size()
 	var ov_sz := _overlay_track.get_combined_minimum_size()
-	if is_portrait:
-		_overlay_track.position = Vector2(vp.x - pad_r - ov_sz.x - 4.0, _right_ctrl_row.position.y - ov_sz.y - 6.0)
-	else:
-		_overlay_track.position = Vector2(_right_ctrl_row.position.x - ov_sz.x - 14.0, vp.y - pad_b - ov_sz.y)
-	_overlay_track.size = ov_sz
 
-	_overlay_card.reset_size()
-	var ovc_sz := _overlay_card.get_combined_minimum_size()
-	ovc_sz.x = clampf(ovc_sz.x, 260.0, minf(284.0, vp.x - pad_l - pad_r))
-	ovc_sz.y = clampf(ovc_sz.y, 76.0, 260.0)
-	_overlay_card.position = Vector2(maxf(pad_l, _overlay_track.position.x + _overlay_track.size.x - ovc_sz.x), _overlay_track.position.y - ovc_sz.y - 8.0)
-	_overlay_card.size = ovc_sz
+	_bell_btn.custom_minimum_size = Vector2(42, 44) if is_portrait else Vector2(44, 46)
+	_bell_btn.reset_size()
+	var bell_sz := _bell_btn.get_combined_minimum_size()
+
+	if is_portrait:
+		var row2_h: float = maxf(ov_sz.y, bell_sz.y)
+		var row2_y: float = _right_ctrl_row.position.y - row2_h - 6.0
+		_bell_btn.position = Vector2(vp.x - pad_r - bell_sz.x, row2_y + (row2_h - bell_sz.y) * 0.5)
+		_bell_btn.size = bell_sz
+		_overlay_track.position = Vector2(maxf(pad_l, _bell_btn.position.x - ov_sz.x - 6.0), row2_y + (row2_h - ov_sz.y) * 0.5)
+		_overlay_track.size = ov_sz
+	else:
+		_bell_btn.position = Vector2(_right_ctrl_row.position.x - bell_sz.x - 6.0, vp.y - pad_b - bell_sz.y)
+		_bell_btn.size = bell_sz
+		_overlay_track.position = Vector2(_bell_btn.position.x - ov_sz.x - 12.0, vp.y - pad_b - ov_sz.y)
+		_overlay_track.size = ov_sz
+
+	# Scroll-clamped Overlay Card (never overflows vp.y in Landscape or Portrait!)
+	var pop_anchor_y: float = minf(_overlay_track.position.y, _bell_btn.position.y) if is_portrait else _overlay_track.position.y
+	if _overlay_card.visible:
+		var max_ovc_h: float = maxf(136.0, pop_anchor_y - (_money_pill.position.y + _money_pill.size.y + 16.0))
+		var raw_body_h: float = _overlay_card_body.get_combined_minimum_size().y
+		var max_scroll_h: float = clampf(max_ovc_h - 94.0, 44.0, 156.0)
+		_overlay_card_scroll.custom_minimum_size = Vector2(0, clampf(raw_body_h, 36.0, max_scroll_h))
+		_overlay_card.reset_size()
+		var ovc_sz := _overlay_card.get_combined_minimum_size()
+		ovc_sz.x = clampf(ovc_sz.x, 250.0, minf(292.0, vp.x - pad_l - pad_r))
+		var ovc_x: float = clampf(_overlay_track.position.x + _overlay_track.size.x - ovc_sz.x, pad_l, maxf(pad_l, vp.x - pad_r - ovc_sz.x))
+		var ovc_y: float = clampf(pop_anchor_y - ovc_sz.y - 8.0, _money_pill.position.y + _money_pill.size.y + 6.0, maxf(pad_t, vp.y - pad_b - ovc_sz.y))
+		_overlay_card.position = Vector2(ovc_x, ovc_y)
+		_overlay_card.size = ovc_sz
 
 	_day_popover.reset_size()
 	var dp_sz := _day_popover.get_combined_minimum_size()
-	_day_popover.position = Vector2(vp.x - pad_r - dp_sz.x - 4.0, _right_ctrl_row.position.y - dp_sz.y - 8.0)
+	dp_sz.x = minf(dp_sz.x, vp.x - pad_l - pad_r)
+	var dp_anchor_y: float = pop_anchor_y if is_portrait else _right_ctrl_row.position.y
+	var dp_x: float = clampf(vp.x - pad_r - dp_sz.x, pad_l, maxf(pad_l, vp.x - pad_r - dp_sz.x))
+	var dp_y: float = clampf(dp_anchor_y - dp_sz.y - 8.0, _money_pill.position.y + _money_pill.size.y + 6.0, maxf(pad_t, vp.y - pad_b - dp_sz.y))
+	_day_popover.position = Vector2(dp_x, dp_y)
 	_day_popover.size = dp_sz
 
 	# 6. Inspector Panel (FactoryPanel docked left in Landscape like game_trucks.webp; bottom sheet in Portrait!)
 	if is_portrait:
-		var sheet_h: float = clampf(vp.y * 0.62, 340.0, vp.y - 160.0)
-		_inspector_panel.position = Vector2(pad_l, _overlay_track.position.y - sheet_h - 8.0)
-		_inspector_panel.size = Vector2(vp.x - pad_l - pad_r - 4.0, sheet_h)
+		var max_sheet_h: float = pop_anchor_y - (_money_pill.position.y + _money_pill.size.y) - 18.0
+		var sheet_h: float = clampf(vp.y * 0.58, 280.0, maxf(280.0, max_sheet_h))
+		_inspector_panel.reset_size()
+		_inspector_panel.position = Vector2(pad_l, maxf(_money_pill.position.y + _money_pill.size.y + 8.0, pop_anchor_y - sheet_h - 8.0))
+		_inspector_panel.size = Vector2(vp.x - pad_l - pad_r, sheet_h)
 	else:
 		var ins_x: float = _rule_vbox.position.x + rv_sz.x + 10.0
-		var ins_w: float = minf(396.0, vp.x * 0.40)
-		var ins_h: float = _bottom_left_row.position.y - pad_t - 10.0
+		var ins_w: float = minf(408.0, vp.x * 0.42)
+		var ins_h: float = clampf(_bottom_left_row.position.y - pad_t - 10.0, 240.0, vp.y - pad_t - pad_b)
+		_inspector_panel.reset_size()
 		_inspector_panel.position = Vector2(ins_x, pad_t)
-		_inspector_panel.size = Vector2(ins_w, maxf(260.0, ins_h))
+		_inspector_panel.size = Vector2(ins_w, ins_h)
 
-	# 7. Centered Wide Overview Modal (matching game_routes.webp!)
+	# 7. Centered Wide Overview Modal (matching game_routes.webp!) + Scrim sync
+	_modal_scrim.visible = _modal_panel.visible
 	_modal_summary.visible = not is_portrait
 	if is_portrait:
-		var mod_h: float = vp.y - (_money_pill.position.y + _money_pill.size.y) - (_bottom_left_row.size.y + pad_b) - 18.0
-		_modal_panel.position = Vector2(pad_l, _money_pill.position.y + _money_pill.size.y + 8.0)
-		_modal_panel.size = Vector2(vp.x - pad_l - pad_r - 4.0, maxf(320.0, mod_h))
+		var mod_top_p: float = _money_pill.position.y + _money_pill.size.y + 8.0
+		var mod_bot_p: float = pop_anchor_y - 8.0
+		_modal_panel.position = Vector2(pad_l, mod_top_p)
+		_modal_panel.size = Vector2(vp.x - pad_l - pad_r, maxf(300.0, mod_bot_p - mod_top_p))
 		_modal_graph.custom_minimum_size = Vector2(0, 68)
 	else:
 		var mod_w: float = minf(980.0, vp.x - pad_l - pad_r - 24.0)
@@ -963,8 +1209,13 @@ func _layout_responsive() -> void:
 		bx = maxf(pad_l + 80.0, minf(bx, _goals_card.position.x - bw - 12.0))
 	elif is_portrait and _goals_mini_pill.visible:
 		by = _goals_mini_pill.position.y + _goals_mini_pill.size.y + 6.0
+	_banner_panel.reset_size()
+	var ban_h: float = maxf(38.0, _banner_panel.get_combined_minimum_size().y)
 	_banner_panel.position = Vector2(bx, by)
-	_banner_panel.size = Vector2(bw, 36.0)
+	_banner_panel.size = Vector2(bw, ban_h)
+
+	if portrait_changed and _modal_panel.visible:
+		_populate_modal_tabs()
 
 func _process(delta: float) -> void:
 	if sim == null:
@@ -1002,11 +1253,12 @@ func show_toast_banner(msg: String, duration: float = 2.6) -> void:
 	_banner_label.text = msg
 	_banner_panel.visible = true
 	_banner_timer = duration
+	_layout_responsive()
 
 func _on_sim_banner(title: String, subtitle: String, _accent: Color) -> void:
 	show_toast_banner("%s — %s" % [title, subtitle], 3.8)
 
-func refresh_top_bar() -> void:
+func _update_top_bar_labels(is_portrait: bool) -> void:
 	if sim == null or _root == null:
 		return
 	_crest_widget.map_id = sim.current_map_id
@@ -1017,8 +1269,7 @@ func refresh_top_bar() -> void:
 	if paren_idx > 0:
 		map_nm = map_nm.substr(0, paren_idx)
 	map_nm = map_nm.replace(" Terpadu", "")
-	var is_portrait: bool = get_viewport().get_visible_rect().size.x < get_viewport().get_visible_rect().size.y
-	if is_portrait and map_nm.length() > 14:
+	if is_portrait and map_nm.length() > 13:
 		map_nm = map_nm.replace("Kabupaten ", "Kab. ").replace("Karesidenan ", "")
 	if is_portrait:
 		_town_btn.text = "%s ▾" % map_nm
@@ -1029,11 +1280,18 @@ func refresh_top_bar() -> void:
 
 	var net_min: int = sim.get_revenue_per_min() - sim.get_upkeep_per_min()
 	if net_min >= 0:
-		_profit_lbl.text = "▲ +%s / min" % GameCatalog.fmt_cash(net_min)
+		_profit_lbl.text = ("▲+%s/m" if is_portrait else "▲ +%s / min") % GameCatalog.fmt_cash(net_min)
 		_profit_lbl.add_theme_color_override("font_color", _status_col(&"good", Color("2C7442")))
 	else:
-		_profit_lbl.text = "▼ %s / min" % GameCatalog.fmt_cash(net_min)
+		_profit_lbl.text = ("▼%s/m" if is_portrait else "▼ %s / min") % GameCatalog.fmt_cash(net_min)
 		_profit_lbl.add_theme_color_override("font_color", _status_col(&"bad", Color("C2412F")))
+
+func refresh_top_bar() -> void:
+	if sim == null or _root == null:
+		return
+	var vp_sz: Vector2 = get_viewport().get_visible_rect().size
+	var is_portrait: bool = vp_sz.x < vp_sz.y
+	_update_top_bar_labels(is_portrait)
 
 	# DayClock HH:MM readout
 	var total_mins: int = int(round(fposmod(sim.day_clock_01, 1.0) * 1440.0)) % 1440
@@ -1122,9 +1380,12 @@ func _refresh_goals_panel() -> void:
 		_goals_hold_lbl.text = "Meet every goal at once for %d s" % int(SimEngine.HOLD_REQUIRED_SEC)
 
 	if _goals_open_btn != null:
+		var was_btn_vis: bool = _goals_open_btn.visible
 		_goals_open_btn.visible = is_ready
 		if is_ready:
 			_goals_open_btn.text = ("🚀 GROW BOOMTOWN LV.%d!" % (sim.boomtown_level + 1)) if is_boom_mode else ("🔓 OPEN REGION %d!" % r_num)
+		if was_btn_vis != is_ready:
+			_layout_responsive()
 
 	var avg_pct: float = 1.0 if is_ready else (sum_pct / float(maxi(1, goals.size())))
 	_goals_mini_ring.progress = avg_pct
@@ -1157,6 +1418,8 @@ func _sync_speed_highlights() -> void:
 		sb.set_pressed_no_signal(int(k) == sim.speed_multiplier)
 
 func _toggle_overlay_mode(mode_id: String) -> void:
+	if _day_popover != null:
+		_day_popover.visible = false
 	if map_view.overlay_mode == mode_id:
 		map_view.overlay_mode = "none"
 	else:
@@ -1175,8 +1438,7 @@ func _sync_overlay_bar() -> void:
 	if not _overlay_card.visible:
 		return
 
-	for ch in _overlay_card_body.get_children():
-		ch.queue_free()
+	_clear_vbox_keep_scroll(_overlay_card_body)
 
 	var titles := {
 		"routes": "Trucks & Routes",
@@ -1209,32 +1471,40 @@ func _sync_overlay_bar() -> void:
 		_overlay_card_body.add_child(_make_legend_chip(GameCatalog.status_color("warn", cb), "Halfway there"))
 		_overlay_card_body.add_child(_make_legend_chip(GameCatalog.status_color("bad", cb), "Below target"))
 	elif cur == "routes":
-		for i in range(mini(6, sim.routes.size())):
-			var rt: Dictionary = sim.routes[i]
-			var rtid := String(rt["id"])
-			var row := HBoxContainer.new()
-			row.add_theme_constant_override("separation", 6)
-			var chk := CheckBox.new()
-			chk.focus_mode = Control.FOCUS_NONE
-			chk.set_pressed_no_signal(not map_view.hidden_route_ids.has(rtid))
-			chk.toggled.connect(func(on: bool):
-				if on:
-					map_view.hidden_route_ids.erase(rtid)
-				else:
-					map_view.hidden_route_ids[rtid] = true
-			)
-			row.add_child(chk)
-			var bar := ColorRect.new()
-			bar.color = rt["color"]
-			bar.custom_minimum_size = Vector2(5, 18)
-			bar.size_flags_vertical = Control.SIZE_SHRINK_CENTER
-			row.add_child(bar)
-			var lbl := Label.new()
-			lbl.text = String(rt["name"])
-			lbl.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-			lbl.clip_text = true
-			row.add_child(lbl)
-			_overlay_card_body.add_child(row)
+		if sim.routes.is_empty():
+			var emp_l := Label.new()
+			emp_l.theme_type_variation = &"CaptionLabel"
+			emp_l.text = "No active routes yet."
+			_overlay_card_body.add_child(emp_l)
+		else:
+			for i in range(sim.routes.size()):
+				var rt: Dictionary = sim.routes[i]
+				var rtid := String(rt["id"])
+				var row := HBoxContainer.new()
+				row.add_theme_constant_override("separation", 6)
+				var chk := CheckBox.new()
+				chk.focus_mode = Control.FOCUS_NONE
+				chk.custom_minimum_size = Vector2(0, 38)
+				chk.set_pressed_no_signal(not map_view.hidden_route_ids.has(rtid))
+				chk.toggled.connect(func(on: bool):
+					if on:
+						map_view.hidden_route_ids.erase(rtid)
+					else:
+						map_view.hidden_route_ids[rtid] = true
+				)
+				row.add_child(chk)
+				var bar := ColorRect.new()
+				bar.color = rt["color"]
+				bar.custom_minimum_size = Vector2(5, 18)
+				bar.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+				row.add_child(bar)
+				var lbl := Label.new()
+				lbl.text = String(rt["name"])
+				lbl.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+				lbl.clip_text = true
+				row.add_child(lbl)
+				_overlay_card_body.add_child(row)
+	_make_scroll_touch_friendly(_overlay_card_scroll)
 	_layout_responsive()
 
 func _make_legend_chip(col: Color, txt: String) -> HBoxContainer:
@@ -1326,13 +1596,16 @@ func _jump_broken_route() -> bool:
 # === DRAWER & MODAL ROUTING ===
 
 func open_drawer(kind: String) -> void:
-	var was_open: bool = current_drawer != ""
+	var prev_kind: String = current_drawer
+	var was_open: bool = prev_kind != ""
 	current_drawer = kind
 	_day_popover.visible = false
+	_scrim_press_pos = Vector2(-9999.0, -9999.0)
 
 	if kind in ["routes", "trucks", "alerts", "maps", "settings"]:
 		_inspector_panel.visible = false
 		_banner_panel.visible = false
+		_modal_scrim.visible = true
 		_modal_panel.visible = true
 		var tab_idx: int = 0
 		if kind == "trucks":
@@ -1343,13 +1616,20 @@ func open_drawer(kind: String) -> void:
 			tab_idx = 3
 		elif kind == "settings":
 			tab_idx = 4
-		_modal_tabs.current_tab = tab_idx
-		_refresh_modal_header_and_graph()
-		_populate_modal_tabs()
+		if _modal_tabs.current_tab != tab_idx:
+			_modal_tabs.current_tab = tab_idx
+		else:
+			_refresh_modal_header_and_graph()
+			_populate_modal_tabs()
 	else:
+		_modal_scrim.visible = false
 		_modal_panel.visible = false
 		_inspector_panel.visible = true
+		_layout_responsive()
+		if prev_kind != kind and _inspector_scroll != null:
+			_inspector_scroll.scroll_vertical = 0
 		_populate_drawer()
+		call_deferred("_layout_responsive")
 
 	if sim.sfx and not was_open:
 		sim.sfx.play_ui("panel_open")
@@ -1362,7 +1642,9 @@ func close_drawer() -> void:
 		map_view.selected_truck_id = ""
 		follow_truck_id = ""
 	current_drawer = ""
+	_scrim_press_pos = Vector2(-9999.0, -9999.0)
 	_inspector_panel.visible = false
+	_modal_scrim.visible = false
 	_modal_panel.visible = false
 	if sim.sfx and was_open:
 		sim.sfx.play_ui("panel_close")
@@ -1375,8 +1657,7 @@ func _populate_drawer() -> void:
 		_populate_modal_tabs()
 		return
 
-	for ch in _inspector_body.get_children():
-		ch.queue_free()
+	var saved_v: int = _clear_vbox_keep_scroll(_inspector_body)
 	_inspector_status_pill.visible = false
 
 	if current_drawer == "facility":
@@ -1391,6 +1672,9 @@ func _populate_drawer() -> void:
 		_build_authentic_offers_panel()
 	elif current_drawer == "goals":
 		_build_authentic_goals_sheet()
+
+	_make_scroll_touch_friendly(_inspector_scroll)
+	_restore_scroll_deferred(_inspector_body, saved_v)
 
 # === 1. AUTHENTIC FACTORY PANEL (matching game_trucks.webp!) ===
 
@@ -1595,7 +1879,9 @@ func _build_authentic_factory_panel() -> void:
 
 		var ubtn := Button.new()
 		ubtn.focus_mode = Control.FOCUS_NONE
-		ubtn.custom_minimum_size = Vector2(0, 36)
+		ubtn.custom_minimum_size = Vector2(0, 40)
+		ubtn.clip_text = true
+		ubtn.text_overrun_behavior = TextServer.OVERRUN_TRIM_ELLIPSIS
 		ubtn.set_meta(&"sfx", "")
 		if track == "exitRoad" and int(up["level"]) > 0:
 			ubtn.theme_type_variation = &"QuietButton"
@@ -1652,6 +1938,7 @@ func _build_authentic_factory_panel() -> void:
 	btn_out.theme_type_variation = &"SegmentButton"
 	btn_out.toggle_mode = true
 	btn_out.focus_mode = Control.FOCUS_NONE
+	btn_out.custom_minimum_size = Vector2(0, 40)
 	btn_out.text = "Outgoing %d" % out_rts.size()
 	btn_out.set_pressed_no_signal(not _fac_show_incoming)
 	btn_out.pressed.connect(func():
@@ -1664,6 +1951,7 @@ func _build_authentic_factory_panel() -> void:
 	btn_in.theme_type_variation = &"SegmentButton"
 	btn_in.toggle_mode = true
 	btn_in.focus_mode = Control.FOCUS_NONE
+	btn_in.custom_minimum_size = Vector2(0, 40)
 	btn_in.text = "Incoming %d" % in_rts.size()
 	btn_in.set_pressed_no_signal(_fac_show_incoming)
 	btn_in.pressed.connect(func():
@@ -1678,8 +1966,10 @@ func _build_authentic_factory_panel() -> void:
 	if f["outputGood"] != null and not _fac_show_incoming:
 		var open_rt_btn := Button.new()
 		open_rt_btn.focus_mode = Control.FOCUS_NONE
+		open_rt_btn.clip_text = true
+		open_rt_btn.text_overrun_behavior = TextServer.OVERRUN_TRIM_ELLIPSIS
 		open_rt_btn.text = "+ Open route from " + String(f["name"])
-		open_rt_btn.custom_minimum_size = Vector2(0, 38)
+		open_rt_btn.custom_minimum_size = Vector2(0, 42)
 		open_rt_btn.pressed.connect(func():
 			map_view.active_tool = "route"
 			map_view.route_draft_from_id = fid
@@ -1693,6 +1983,7 @@ func _build_authentic_factory_panel() -> void:
 	if shown_rts.is_empty():
 		var empty_lbl := Label.new()
 		empty_lbl.theme_type_variation = &"CaptionLabel"
+		empty_lbl.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 		empty_lbl.text = "No incoming routes yet." if _fac_show_incoming else "No outgoing routes yet. Tap '+ Open route' above!"
 		_inspector_body.add_child(empty_lbl)
 	else:
@@ -1767,7 +2058,7 @@ func _build_route_card_for_factory(rt: Dictionary, is_incoming: bool) -> PanelCo
 	minus_b.focus_mode = Control.FOCUS_NONE
 	minus_b.text = "−"
 	minus_b.tooltip_text = ("Sell 1 truck (+" + GameCatalog.fmt_cash(resale_p) + ")") if cnt > 0 else "No trucks"
-	minus_b.custom_minimum_size = Vector2(34, 34)
+	minus_b.custom_minimum_size = Vector2(42, 42)
 	minus_b.disabled = (cnt <= 0)
 	minus_b.set_meta(&"sfx", "sell")
 	minus_b.pressed.connect(func():
@@ -1779,7 +2070,9 @@ func _build_route_card_for_factory(rt: Dictionary, is_incoming: bool) -> PanelCo
 	var swap_toggle := Button.new()
 	swap_toggle.focus_mode = Control.FOCUS_NONE
 	swap_toggle.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	swap_toggle.custom_minimum_size = Vector2(0, 34)
+	swap_toggle.custom_minimum_size = Vector2(0, 42)
+	swap_toggle.clip_text = true
+	swap_toggle.text_overrun_behavior = TextServer.OVERRUN_TRIM_ELLIPSIS
 	swap_toggle.text = "%d × %s ▾" % [cnt, String(m_def["name"])]
 	swap_toggle.pressed.connect(func():
 		_fac_swap_route_id = "" if _fac_swap_route_id == rtid else rtid
@@ -1793,7 +2086,7 @@ func _build_route_card_for_factory(rt: Dictionary, is_incoming: bool) -> PanelCo
 	var plus_b := Button.new()
 	plus_b.theme_type_variation = &"PrimaryButton"
 	plus_b.focus_mode = Control.FOCUS_NONE
-	plus_b.custom_minimum_size = Vector2(88, 34)
+	plus_b.custom_minimum_size = Vector2(92, 42)
 	plus_b.text = "+ " + GameCatalog.fmt_cash(nxt_p)
 	plus_b.set_meta(&"sfx", "purchase")
 	plus_b.pressed.connect(func():
@@ -1823,6 +2116,7 @@ func _build_route_card_for_factory(rt: Dictionary, is_incoming: bool) -> PanelCo
 			mb.focus_mode = Control.FOCUS_NONE
 			mb.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 			mb.custom_minimum_size = Vector2(0, 46)
+			mb.clip_text = true
 			mb.set_pressed_no_signal(_fac_swap_target_model == cand_m)
 			var tag := "current" if cand_m == m_id else (("%d km/h · %d slots" % [int(cdef["speed_kmh"]), int(cdef["slot_cap"])]) if has_lic else ("Licence " + GameCatalog.fmt_cash(int(cdef["license_price"]))))
 			mb.text = "%s\n%s" % [String(cdef["name"]), tag]
@@ -1846,6 +2140,7 @@ func _build_route_card_for_factory(rt: Dictionary, is_incoming: bool) -> PanelCo
 			var exec_swap := Button.new()
 			exec_swap.theme_type_variation = &"PrimaryButton"
 			exec_swap.focus_mode = Control.FOCUS_NONE
+			exec_swap.custom_minimum_size = Vector2(0, 40)
 			exec_swap.text = "Swap all %d" % cnt
 			exec_swap.pressed.connect(func():
 				if sim.apply_route_model_swap(rtid, _fac_swap_target_model):
@@ -1870,6 +2165,7 @@ func _build_route_card_for_factory(rt: Dictionary, is_incoming: bool) -> PanelCo
 			var chip_b := Button.new()
 			chip_b.theme_type_variation = &"QuietButton"
 			chip_b.focus_mode = Control.FOCUS_NONE
+			chip_b.custom_minimum_size = Vector2(0, 38)
 			var has_c: bool = not ag_t.is_empty() and int(ag_t.get("cargoQty", 0)) > 0
 			chip_b.text = ("🚚#%d•" if has_c else "🚚#%d") % (ti + 1)
 			chip_b.pressed.connect(func():
@@ -1887,15 +2183,17 @@ func _build_route_card_for_factory(rt: Dictionary, is_incoming: bool) -> PanelCo
 			chip_flow.add_child(more_l)
 		rcol.add_child(chip_flow)
 
-	# Bottom quick actions: Edit path / Waypoints, Same way back, Clear WP & Retire
-	var r3 := HBoxContainer.new()
-	r3.add_theme_constant_override("separation", 4)
+	# Bottom quick actions: Edit path / Waypoints, Same way back, Clear WP & Retire (wraps cleanly on Portrait)
+	var r3 := HFlowContainer.new()
+	r3.add_theme_constant_override("h_separation", 6)
+	r3.add_theme_constant_override("v_separation", 6)
 	var swb_on: bool = bool(rt.get("sameWayBack", true))
 	var wp_cnt: int = (rt["waypoints"] as Array).size()
 	var wp_back_cnt: int = (rt.get("waypointsBack", []) as Array).size()
 	var wp_btn := Button.new()
 	wp_btn.theme_type_variation = &"QuietButton"
 	wp_btn.focus_mode = Control.FOCUS_NONE
+	wp_btn.custom_minimum_size = Vector2(0, 40)
 	wp_btn.text = ("Path (%d WP)" % wp_cnt) if swb_on else ("Path (%d/%d WP)" % [wp_cnt, wp_back_cnt])
 	wp_btn.pressed.connect(func():
 		map_view.selected_route_id = rtid
@@ -1909,6 +2207,7 @@ func _build_route_card_for_factory(rt: Dictionary, is_incoming: bool) -> PanelCo
 		var ret_wp_btn := Button.new()
 		ret_wp_btn.theme_type_variation = &"QuietButton"
 		ret_wp_btn.focus_mode = Control.FOCUS_NONE
+		ret_wp_btn.custom_minimum_size = Vector2(0, 40)
 		ret_wp_btn.text = "Edit Return"
 		ret_wp_btn.pressed.connect(func():
 			map_view.selected_route_id = rtid
@@ -1922,6 +2221,7 @@ func _build_route_card_for_factory(rt: Dictionary, is_incoming: bool) -> PanelCo
 		var clr_wp := Button.new()
 		clr_wp.theme_type_variation = &"QuietButton"
 		clr_wp.focus_mode = Control.FOCUS_NONE
+		clr_wp.custom_minimum_size = Vector2(0, 40)
 		clr_wp.text = "Clear WP"
 		clr_wp.pressed.connect(func():
 			sim.clear_route_waypoints(rtid, false)
@@ -1933,6 +2233,7 @@ func _build_route_card_for_factory(rt: Dictionary, is_incoming: bool) -> PanelCo
 
 	var swb_chk := CheckBox.new()
 	swb_chk.focus_mode = Control.FOCUS_NONE
+	swb_chk.custom_minimum_size = Vector2(0, 40)
 	swb_chk.text = "Same back"
 	swb_chk.set_pressed_no_signal(swb_on)
 	swb_chk.toggled.connect(func(on: bool):
@@ -1943,19 +2244,25 @@ func _build_route_card_for_factory(rt: Dictionary, is_incoming: bool) -> PanelCo
 	)
 	r3.add_child(swb_chk)
 
-	var spc := Control.new()
-	spc.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	r3.add_child(spc)
-
 	var ret_btn := Button.new()
 	ret_btn.theme_type_variation = &"QuietButton"
 	ret_btn.focus_mode = Control.FOCUS_NONE
+	ret_btn.custom_minimum_size = Vector2(0, 40)
 	ret_btn.text = "Retire"
 	ret_btn.add_theme_color_override("font_color", _status_col(&"bad", Color("C2412F")))
-	ret_btn.set_meta(&"sfx", "remove")
+	ret_btn.set_meta(&"sfx", "")
 	ret_btn.pressed.connect(func():
-		sim.delete_route(rtid)
-		_populate_drawer()
+		var rt_nm_c := String(rt.get("name", "rute ini"))
+		_request_confirm_or_run(
+			"Pensiunkan Rute?",
+			"Hentikan \"%s\" dan jual seluruh %d truk yang bertugas pada rute ini?" % [rt_nm_c, cnt],
+			"Pensiunkan",
+			func():
+				if sim.sfx:
+					sim.sfx.play_ui("remove")
+				sim.delete_route(rtid)
+				_populate_drawer()
+		)
 	)
 	r3.add_child(ret_btn)
 	rcol.add_child(r3)
@@ -2106,6 +2413,7 @@ func _build_authentic_truck_panel() -> void:
 			var cb_btn := Button.new()
 			cb_btn.theme_type_variation = &"QuietButton"
 			cb_btn.focus_mode = Control.FOCUS_NONE
+			cb_btn.custom_minimum_size = Vector2(0, 38)
 			cb_btn.text = "→ " + bid.to_upper()
 			cb_btn.pressed.connect(func():
 				var blk_ag: Dictionary = sim.get_agent(bid)
@@ -2136,7 +2444,8 @@ func _build_authentic_truck_panel() -> void:
 	flw_btn.toggle_mode = true
 	flw_btn.focus_mode = Control.FOCUS_NONE
 	flw_btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	flw_btn.custom_minimum_size = Vector2(0, 38)
+	flw_btn.custom_minimum_size = Vector2(0, 42)
+	flw_btn.clip_text = true
 	flw_btn.set_pressed_no_signal(follow_truck_id == tid)
 	flw_btn.text = "◎ Following" if follow_truck_id == tid else "◎ Follow truck"
 	flw_btn.toggled.connect(func(on: bool):
@@ -2148,7 +2457,8 @@ func _build_authentic_truck_panel() -> void:
 	var cause_btn := Button.new()
 	cause_btn.focus_mode = Control.FOCUS_NONE
 	cause_btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	cause_btn.custom_minimum_size = Vector2(0, 38)
+	cause_btn.custom_minimum_size = Vector2(0, 42)
+	cause_btn.clip_text = true
 	cause_btn.text = "⌖ Go to cause"
 	cause_btn.disabled = not bool(diag.get("hasCause", false))
 	cause_btn.pressed.connect(func():
@@ -2163,7 +2473,8 @@ func _build_authentic_truck_panel() -> void:
 	var leave_btn := Button.new()
 	leave_btn.focus_mode = Control.FOCUS_NONE
 	leave_btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	leave_btn.custom_minimum_size = Vector2(0, 38)
+	leave_btn.custom_minimum_size = Vector2(0, 42)
+	leave_btn.clip_text = true
 	leave_btn.text = "⇢ Leave bay"
 	leave_btn.disabled = st_s not in ["loading", "queuing_bay", "unloading"]
 	leave_btn.pressed.connect(func():
@@ -2176,7 +2487,8 @@ func _build_authentic_truck_panel() -> void:
 	var dep_btn := Button.new()
 	dep_btn.focus_mode = Control.FOCUS_NONE
 	dep_btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	dep_btn.custom_minimum_size = Vector2(0, 38)
+	dep_btn.custom_minimum_size = Vector2(0, 42)
+	dep_btn.clip_text = true
 	dep_btn.text = "⌂ To depot"
 	dep_btn.disabled = st_s in ["driving_to_depot", "at_depot"] or sim.depot.is_empty()
 	dep_btn.pressed.connect(func():
@@ -2189,7 +2501,8 @@ func _build_authentic_truck_panel() -> void:
 	var open_rt := Button.new()
 	open_rt.focus_mode = Control.FOCUS_NONE
 	open_rt.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	open_rt.custom_minimum_size = Vector2(0, 38)
+	open_rt.custom_minimum_size = Vector2(0, 42)
+	open_rt.clip_text = true
 	open_rt.text = "⇄ Open route"
 	open_rt.pressed.connect(func():
 		map_view.selected_route_id = rtid
@@ -2200,7 +2513,8 @@ func _build_authentic_truck_panel() -> void:
 	var swap_rt := Button.new()
 	swap_rt.focus_mode = Control.FOCUS_NONE
 	swap_rt.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	swap_rt.custom_minimum_size = Vector2(0, 38)
+	swap_rt.custom_minimum_size = Vector2(0, 42)
+	swap_rt.clip_text = true
 	swap_rt.text = "⟳ Swap model"
 	swap_rt.pressed.connect(func():
 		_overview_swap_route_id = rtid
@@ -2212,7 +2526,7 @@ func _build_authentic_truck_panel() -> void:
 	var resale_v: int = sim.get_agent_resale_value(ag)
 	var sell_trk := Button.new()
 	sell_trk.focus_mode = Control.FOCUS_NONE
-	sell_trk.custom_minimum_size = Vector2(0, 38)
+	sell_trk.custom_minimum_size = Vector2(0, 42)
 	sell_trk.text = "Sell truck (+" + GameCatalog.fmt_cash(resale_v) + ")"
 	sell_trk.add_theme_color_override("font_color", _status_col(&"bad", Color("C2412F")))
 	sell_trk.set_meta(&"sfx", "sell")
@@ -2349,6 +2663,9 @@ func _build_authentic_junction_panel() -> void:
 		var b := Button.new()
 		b.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 		b.focus_mode = Control.FOCUS_NONE
+		b.custom_minimum_size = Vector2(0, 42)
+		b.clip_text = true
+		b.text_overrun_behavior = TextServer.OVERRUN_TRIM_ELLIPSIS
 		b.text = String(cspec[1])
 		b.pressed.connect(func():
 			show_toast_banner(sim.apply_junction_control(jid, cid))
@@ -2360,7 +2677,8 @@ func _build_authentic_junction_panel() -> void:
 		var rot_b := Button.new()
 		rot_b.theme_type_variation = &"PrimaryButton"
 		rot_b.focus_mode = Control.FOCUS_NONE
-		rot_b.custom_minimum_size = Vector2(0, 38)
+		rot_b.custom_minimum_size = Vector2(0, 42)
+		rot_b.clip_text = true
 		rot_b.text = "↻ Rotate main priority road ($0)"
 		rot_b.pressed.connect(func():
 			show_toast_banner(sim.rotate_yield_priority(jid))
@@ -2382,12 +2700,14 @@ func _build_authentic_junction_panel() -> void:
 
 		var badge := Label.new()
 		badge.theme_type_variation = &"SectionLabel"
+		badge.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 		badge.text = "Multi-phase signal controller (%d phases)" % phases.size()
 		lcol.add_child(badge)
 
-		# Phase selector tabs + Add/Remove phase buttons
-		var ph_row := HBoxContainer.new()
-		ph_row.add_theme_constant_override("separation", 4)
+		# Phase selector tabs + Add/Remove phase buttons (wraps cleanly on Portrait)
+		var ph_row := HFlowContainer.new()
+		ph_row.add_theme_constant_override("h_separation", 6)
+		ph_row.add_theme_constant_override("v_separation", 6)
 		var ph_names := ["A", "B", "C", "D"]
 		for pi in range(phases.size()):
 			var p_idx: int = pi
@@ -2395,7 +2715,7 @@ func _build_authentic_junction_panel() -> void:
 			pb.theme_type_variation = &"SegmentButton"
 			pb.toggle_mode = true
 			pb.focus_mode = Control.FOCUS_NONE
-			pb.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+			pb.custom_minimum_size = Vector2(92, 40)
 			pb.text = "Phase %s (%ds)" % [ph_names[pi], int(round(float(phases[pi]["green"])))]
 			pb.set_pressed_no_signal(_selected_light_phase == pi)
 			pb.pressed.connect(func():
@@ -2408,6 +2728,7 @@ func _build_authentic_junction_panel() -> void:
 			var add_ph := Button.new()
 			add_ph.theme_type_variation = &"ToolButton"
 			add_ph.focus_mode = Control.FOCUS_NONE
+			add_ph.custom_minimum_size = Vector2(52, 40)
 			add_ph.text = "+ Ph"
 			add_ph.pressed.connect(func():
 				if sim.add_light_phase(jid):
@@ -2420,6 +2741,7 @@ func _build_authentic_junction_panel() -> void:
 			var rem_ph := Button.new()
 			rem_ph.theme_type_variation = &"ToolButton"
 			rem_ph.focus_mode = Control.FOCUS_NONE
+			rem_ph.custom_minimum_size = Vector2(52, 40)
 			rem_ph.text = "− Ph"
 			rem_ph.pressed.connect(func():
 				if sim.remove_light_phase(jid, _selected_light_phase):
@@ -2440,6 +2762,7 @@ func _build_authentic_junction_panel() -> void:
 		sg.max_value = 60.0
 		sg.step = 1.0
 		sg.value = float(cur_ph["green"])
+		sg.custom_minimum_size = Vector2(0, 36)
 		sg.value_changed.connect(func(v: float):
 			sim.set_light_phase_green(jid, _selected_light_phase, v)
 			lg.text = "Phase %s green duration: %d s" % [ph_lbl_name, int(round(v))]
@@ -2449,6 +2772,7 @@ func _build_authentic_junction_panel() -> void:
 		# Per-arm turn-head matrix for selected phase
 		var arms_cap := Label.new()
 		arms_cap.theme_type_variation = &"CaptionLabel"
+		arms_cap.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 		arms_cap.text = "Phase %s allowed arm movements (tap to cycle turn heads):" % ph_lbl_name
 		lcol.add_child(arms_cap)
 
@@ -2461,7 +2785,9 @@ func _build_authentic_junction_panel() -> void:
 			var mask_val: int = int(cur_arms.get(arm_eid, 0))
 			var ab := Button.new()
 			ab.focus_mode = Control.FOCUS_NONE
-			ab.custom_minimum_size = Vector2(0, 34)
+			ab.custom_minimum_size = Vector2(0, 42)
+			ab.clip_text = true
+			ab.text_overrun_behavior = TextServer.OVERRUN_TRIM_ELLIPSIS
 			ab.text = "%s: %s" % [String(r_arm["name"]), SimEngine.format_turn_mask(mask_val)]
 			ab.pressed.connect(func():
 				sim.cycle_light_arm_turn_mask(jid, _selected_light_phase, arm_eid)
@@ -2481,6 +2807,7 @@ func _build_authentic_junction_panel() -> void:
 		sy.max_value = 5.0
 		sy.step = 0.5
 		sy.value = y_sec
+		sy.custom_minimum_size = Vector2(0, 36)
 		sy.value_changed.connect(func(v: float):
 			lt["yellowSec"] = v
 			ly.text = "Yellow clearance: %.1f s · All-red: %.1f s" % [v, float(lt.get("allRedSec", 1.0))]
@@ -2489,6 +2816,8 @@ func _build_authentic_junction_panel() -> void:
 
 		var act_chk := CheckBox.new()
 		act_chk.focus_mode = Control.FOCUS_NONE
+		act_chk.custom_minimum_size = Vector2(0, 40)
+		act_chk.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 		act_chk.text = "Actuated gap sensor (skips empty phases)"
 		act_chk.set_pressed_no_signal(bool(lt["actuated"]))
 		act_chk.toggled.connect(func(on: bool):
@@ -2508,6 +2837,7 @@ func _build_authentic_junction_panel() -> void:
 			sgap.max_value = 6.0
 			sgap.step = 0.5
 			sgap.value = gap_v
+			sgap.custom_minimum_size = Vector2(0, 36)
 			sgap.value_changed.connect(func(v: float):
 				lt["sensorGapSec"] = v
 				lgap.text = "Gap-out threshold: %.1f s" % v
@@ -2517,6 +2847,7 @@ func _build_authentic_junction_panel() -> void:
 		var rem := Button.new()
 		rem.theme_type_variation = &"QuietButton"
 		rem.focus_mode = Control.FOCUS_NONE
+		rem.custom_minimum_size = Vector2(0, 40)
 		rem.text = "Remove traffic lights (+$500 refund)"
 		rem.add_theme_color_override("font_color", _status_col(&"bad", Color("C2412F")))
 		rem.pressed.connect(func():
@@ -2570,7 +2901,9 @@ func _build_authentic_road_panel() -> void:
 			db.theme_type_variation = &"PrimaryButton"
 		db.focus_mode = Control.FOCUS_NONE
 		db.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-		db.custom_minimum_size = Vector2(0, 38)
+		db.custom_minimum_size = Vector2(0, 42)
+		db.clip_text = true
+		db.text_overrun_behavior = TextServer.OVERRUN_TRIM_ELLIPSIS
 		db.text = String(dact[0])
 		db.pressed.connect(dact[1] as Callable)
 		dir_grid.add_child(db)
@@ -2595,7 +2928,9 @@ func _build_authentic_road_panel() -> void:
 		var jb := Button.new()
 		jb.focus_mode = Control.FOCUS_NONE
 		jb.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-		jb.custom_minimum_size = Vector2(0, 36)
+		jb.custom_minimum_size = Vector2(0, 40)
+		jb.clip_text = true
+		jb.text_overrun_behavior = TextServer.OVERRUN_TRIM_ELLIPSIS
 		jb.text = String(jact[0])
 		jb.pressed.connect(jact[1] as Callable)
 		junc_grid.add_child(jb)
@@ -2616,7 +2951,9 @@ func _build_authentic_road_panel() -> void:
 		if bool(act[2]):
 			b.theme_type_variation = &"PrimaryButton"
 		b.focus_mode = Control.FOCUS_NONE
-		b.custom_minimum_size = Vector2(0, 38)
+		b.custom_minimum_size = Vector2(0, 42)
+		b.clip_text = true
+		b.text_overrun_behavior = TextServer.OVERRUN_TRIM_ELLIPSIS
 		b.text = String(act[0])
 		b.pressed.connect(act[1] as Callable)
 		_inspector_body.add_child(b)
@@ -2641,6 +2978,7 @@ func _build_authentic_offers_panel() -> void:
 		col.add_theme_constant_override("separation", 4)
 		card.add_child(col)
 		var t := Label.new()
+		t.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 		t.text = String(off["name"])
 		col.add_child(t)
 		var sub := Label.new()
@@ -2651,6 +2989,8 @@ func _build_authentic_offers_panel() -> void:
 		var b := Button.new()
 		b.theme_type_variation = &"PrimaryButton"
 		b.focus_mode = Control.FOCUS_NONE
+		b.custom_minimum_size = Vector2(0, 42)
+		b.clip_text = true
 		b.disabled = bought or excl or (not reg_ok)
 		if bought:
 			b.text = "Built"
@@ -2678,7 +3018,8 @@ func _build_authentic_goals_sheet() -> void:
 		var open_b := Button.new()
 		open_b.theme_type_variation = &"PrimaryButton"
 		open_b.focus_mode = Control.FOCUS_NONE
-		open_b.custom_minimum_size = Vector2(0, 42)
+		open_b.custom_minimum_size = Vector2(0, 44)
+		open_b.clip_text = true
 		open_b.text = ("🚀 GROW BOOMTOWN LV.%d NOW!" % (sim.boomtown_level + 1)) if is_b else "🔓 OPEN READY REGION NOW!"
 		open_b.pressed.connect(func():
 			close_drawer()
@@ -2698,6 +3039,7 @@ func _build_authentic_goals_sheet() -> void:
 		var rdy: bool = bool(reg.get("goalReady", false)) or float(reg.get("holdSeconds", 0.0)) >= SimEngine.HOLD_REQUIRED_SEC
 		var status_s: String = "OPEN" if unl else ("READY TO OPEN!" if rdy else ("HOLD %ds/%ds" % [int(round(float(reg["holdSeconds"]))), hold_req]))
 		var hd := Label.new()
+		hd.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 		hd.text = "Region %d: %s — %s" % [int(reg["index"]) + 1, String(reg["name"]), status_s]
 		col.add_child(hd)
 		for g in reg["goals"]:
@@ -2705,11 +3047,13 @@ func _build_authentic_goals_sheet() -> void:
 			var gdef: Dictionary = GameCatalog.GOODS[gid]
 			var gl := Label.new()
 			gl.theme_type_variation = &"CaptionLabel"
+			gl.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 			gl.text = "• %s (%s): %.1f / %.1f / min" % [String(gdef["name"]), String(gdef["local"]), float(g.get("currentPerMin", 0.0)), float(g["targetPerMin"])]
 			col.add_child(gl)
 		var jb := Button.new()
 		jb.theme_type_variation = &"QuietButton"
 		jb.focus_mode = Control.FOCUS_NONE
+		jb.custom_minimum_size = Vector2(0, 40)
 		jb.text = "Show on map →"
 		jb.pressed.connect(func():
 			focus_world_requested.emit(reg["center_vec"])
@@ -2727,13 +3071,21 @@ func _refresh_modal_header_and_graph() -> void:
 	var upk: int = sim.get_upkeep_per_min()
 	var prof: int = inc - upk
 	var p_sign := "+" if prof >= 0 else ""
-	_modal_summary.text = "%s   income %s / min · upkeep %s / min · profit %s%s / min   %d trucks" % [
-		GameCatalog.fmt_cash(sim.cash),
-		GameCatalog.fmt_cash(inc),
-		GameCatalog.fmt_cash(upk),
-		p_sign, GameCatalog.fmt_cash(prof),
-		sim.agents.size()
-	]
+	var vp_sz: Vector2 = get_viewport().get_visible_rect().size
+	if vp_sz.x < vp_sz.y:
+		_modal_summary.text = "%s · %s%s/m · %d🚚" % [
+			GameCatalog.fmt_cash(sim.cash),
+			p_sign, GameCatalog.fmt_cash(prof),
+			sim.agents.size()
+		]
+	else:
+		_modal_summary.text = "%s   income %s / min · upkeep %s / min · profit %s%s / min   %d trucks" % [
+			GameCatalog.fmt_cash(sim.cash),
+			GameCatalog.fmt_cash(inc),
+			GameCatalog.fmt_cash(upk),
+			p_sign, GameCatalog.fmt_cash(prof),
+			sim.agents.size()
+		]
 	_modal_graph.history = sim.cash_history
 	_modal_graph.cur_cash = sim.cash
 	_modal_graph.line_col = _status_col(&"good", Color("2C7442"))
@@ -2763,13 +3115,17 @@ func _populate_modal_tabs() -> void:
 		_modal_title.text = "Android & Options"
 		_modal_graph.visible = false
 		_build_overview_options_tab()
+	_make_scroll_touch_friendly(_modal_tabs)
 
 func _build_overview_routes_tab() -> void:
-	for ch in _tab_routes_vbox.get_children():
-		ch.queue_free()
+	var saved_v: int = _clear_vbox_keep_scroll(_tab_routes_vbox)
+	var vp_sz: Vector2 = get_viewport().get_visible_rect().size
+	var is_portrait: bool = vp_sz.x < vp_sz.y
+	var compact_cards: bool = vp_sz.x < 960.0
 
-	var top_bar := HBoxContainer.new()
-	top_bar.add_theme_constant_override("separation", 10)
+	var top_bar := BoxContainer.new()
+	top_bar.vertical = is_portrait
+	top_bar.add_theme_constant_override("separation", 8)
 	var hint := Label.new()
 	hint.theme_type_variation = &"CaptionLabel"
 	hint.size_flags_horizontal = Control.SIZE_EXPAND_FILL
@@ -2780,6 +3136,7 @@ func _build_overview_routes_tab() -> void:
 	var new_rt := Button.new()
 	new_rt.theme_type_variation = &"PrimaryButton"
 	new_rt.focus_mode = Control.FOCUS_NONE
+	new_rt.custom_minimum_size = Vector2(0, 42)
 	new_rt.text = "+ Open new route"
 	new_rt.pressed.connect(func():
 		close_drawer()
@@ -2792,6 +3149,7 @@ func _build_overview_routes_tab() -> void:
 		var emp := Label.new()
 		emp.text = "No active routes yet."
 		_tab_routes_vbox.add_child(emp)
+		_make_scroll_touch_friendly(_tab_routes_vbox.get_parent())
 		return
 
 	for rt in sim.routes:
@@ -2851,12 +3209,22 @@ func _build_overview_routes_tab() -> void:
 		stat_lbl.add_theme_color_override("font_color", _status_col(&"text_muted", Color("625F57")))
 		row.add_child(stat_lbl)
 
-		var actions := HBoxContainer.new()
-		actions.add_theme_constant_override("separation", 5)
-		row.add_child(actions)
+		var actions: Container
+		if compact_cards:
+			var af := HFlowContainer.new()
+			af.add_theme_constant_override("h_separation", 6)
+			af.add_theme_constant_override("v_separation", 6)
+			vbox.add_child(af)
+			actions = af
+		else:
+			var ah := HBoxContainer.new()
+			ah.add_theme_constant_override("separation", 5)
+			row.add_child(ah)
+			actions = ah
 
 		var sw_b := Button.new()
 		sw_b.focus_mode = Control.FOCUS_NONE
+		sw_b.custom_minimum_size = Vector2(0, 40)
 		sw_b.text = "Swap model"
 		sw_b.pressed.connect(func():
 			_overview_swap_route_id = "" if _overview_swap_route_id == rtid else rtid
@@ -2868,6 +3236,7 @@ func _build_overview_routes_tab() -> void:
 		var buy_b := Button.new()
 		buy_b.theme_type_variation = &"PrimaryButton"
 		buy_b.focus_mode = Control.FOCUS_NONE
+		buy_b.custom_minimum_size = Vector2(0, 40)
 		buy_b.text = "Buy " + GameCatalog.fmt_cash(nxt_p)
 		buy_b.set_meta(&"sfx", "purchase")
 		buy_b.pressed.connect(func():
@@ -2881,6 +3250,7 @@ func _build_overview_routes_tab() -> void:
 		var resale_p: int = GameCatalog.compute_truck_resale_price(m_id, owned_m, sim.agents.size()) if cnt > 0 else 0
 		var sell_b := Button.new()
 		sell_b.focus_mode = Control.FOCUS_NONE
+		sell_b.custom_minimum_size = Vector2(0, 40)
 		sell_b.text = ("Sell +" + GameCatalog.fmt_cash(resale_p)) if cnt > 0 else "Sell"
 		sell_b.disabled = (cnt <= 0)
 		sell_b.set_meta(&"sfx", "sell")
@@ -2893,6 +3263,7 @@ func _build_overview_routes_tab() -> void:
 
 		var show_b := Button.new()
 		show_b.focus_mode = Control.FOCUS_NONE
+		show_b.custom_minimum_size = Vector2(0, 40)
 		show_b.text = "Show"
 		show_b.pressed.connect(func():
 			var f0: Dictionary = sim.facility_map.get(String(rt["fromFacilityId"]), {})
@@ -2906,29 +3277,44 @@ func _build_overview_routes_tab() -> void:
 
 		var ret_b := Button.new()
 		ret_b.focus_mode = Control.FOCUS_NONE
+		ret_b.custom_minimum_size = Vector2(0, 40)
 		ret_b.text = "Retire"
-		ret_b.set_meta(&"sfx", "remove")
+		ret_b.add_theme_color_override("font_color", _status_col(&"bad", Color("C2412F")))
+		ret_b.set_meta(&"sfx", "")
 		ret_b.pressed.connect(func():
-			sim.delete_route(rtid)
-			_refresh_modal_header_and_graph()
-			_build_overview_routes_tab()
+			var rt_nm_c := String(rt.get("name", "rute ini"))
+			_request_confirm_or_run(
+				"Pensiunkan Rute?",
+				"Hentikan \"%s\" dan jual seluruh %d truk yang bertugas pada rute ini?" % [rt_nm_c, cnt],
+				"Pensiunkan",
+				func():
+					if sim.sfx:
+						sim.sfx.play_ui("remove")
+					sim.delete_route(rtid)
+					_refresh_modal_header_and_graph()
+					_build_overview_routes_tab()
+			)
 		)
 		actions.add_child(ret_b)
 
-		var sub_row := HBoxContainer.new()
-		sub_row.add_theme_constant_override("separation", 10)
 		var br_txt := String(rt.get("brokenReason", ""))
 		if br_txt != "":
 			var br_lbl := Label.new()
+			br_lbl.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 			br_lbl.text = "⚠ " + br_txt
 			br_lbl.add_theme_color_override("font_color", _status_col(&"bad", Color("C2412F")))
-			sub_row.add_child(br_lbl)
+			vbox.add_child(br_lbl)
+
+		var sub_row := HFlowContainer.new()
+		sub_row.add_theme_constant_override("h_separation", 8)
+		sub_row.add_theme_constant_override("v_separation", 6)
 
 		var swb_on: bool = bool(rt.get("sameWayBack", true))
 		var wp_cnt: int = (rt["waypoints"] as Array).size()
 		var wp_back_cnt: int = (rt.get("waypointsBack", []) as Array).size()
 		var wp_lbl := Label.new()
 		wp_lbl.theme_type_variation = &"CaptionLabel"
+		wp_lbl.size_flags_vertical = Control.SIZE_SHRINK_CENTER
 		wp_lbl.text = ("Waypoints: %d" % wp_cnt) if swb_on else ("Way there: %d · Way back: %d" % [wp_cnt, wp_back_cnt])
 		sub_row.add_child(wp_lbl)
 
@@ -2936,6 +3322,7 @@ func _build_overview_routes_tab() -> void:
 			var edit_there := Button.new()
 			edit_there.theme_type_variation = &"QuietButton"
 			edit_there.focus_mode = Control.FOCUS_NONE
+			edit_there.custom_minimum_size = Vector2(0, 38)
 			edit_there.text = "Edit way there"
 			edit_there.pressed.connect(func():
 				map_view.selected_route_id = rtid
@@ -2948,6 +3335,7 @@ func _build_overview_routes_tab() -> void:
 			var edit_back := Button.new()
 			edit_back.theme_type_variation = &"QuietButton"
 			edit_back.focus_mode = Control.FOCUS_NONE
+			edit_back.custom_minimum_size = Vector2(0, 38)
 			edit_back.text = "Edit way back"
 			edit_back.pressed.connect(func():
 				map_view.selected_route_id = rtid
@@ -2961,6 +3349,7 @@ func _build_overview_routes_tab() -> void:
 			var clr_b := Button.new()
 			clr_b.theme_type_variation = &"QuietButton"
 			clr_b.focus_mode = Control.FOCUS_NONE
+			clr_b.custom_minimum_size = Vector2(0, 38)
 			clr_b.text = "Clear waypoints"
 			clr_b.pressed.connect(func():
 				sim.clear_route_waypoints(rtid, false)
@@ -2972,6 +3361,7 @@ func _build_overview_routes_tab() -> void:
 
 		var swb_c := CheckBox.new()
 		swb_c.focus_mode = Control.FOCUS_NONE
+		swb_c.custom_minimum_size = Vector2(0, 38)
 		swb_c.text = "Same way back"
 		swb_c.set_pressed_no_signal(swb_on)
 		swb_c.toggled.connect(func(on: bool):
@@ -2990,6 +3380,7 @@ func _build_overview_routes_tab() -> void:
 			t_flow.add_theme_constant_override("v_separation", 4)
 			var t_cap := Label.new()
 			t_cap.theme_type_variation = &"CaptionLabel"
+			t_cap.size_flags_vertical = Control.SIZE_SHRINK_CENTER
 			t_cap.text = "Inspect truck:"
 			t_flow.add_child(t_cap)
 			var show_n: int = mini(10, rt_tids.size())
@@ -2999,6 +3390,7 @@ func _build_overview_routes_tab() -> void:
 				var tb_i := Button.new()
 				tb_i.theme_type_variation = &"QuietButton"
 				tb_i.focus_mode = Control.FOCUS_NONE
+				tb_i.custom_minimum_size = Vector2(0, 38)
 				tb_i.text = "#%d (%s)" % [ti + 1, tid_s.to_upper()]
 				tb_i.pressed.connect(func():
 					if not ag_i.is_empty():
@@ -3010,8 +3402,10 @@ func _build_overview_routes_tab() -> void:
 			vbox.add_child(t_flow)
 
 		if _overview_swap_route_id == rtid:
-			var sw_row := HBoxContainer.new()
-			sw_row.add_theme_constant_override("separation", 6)
+			var sw_row := GridContainer.new()
+			sw_row.columns = 2 if compact_cards else 4
+			sw_row.add_theme_constant_override("h_separation", 6)
+			sw_row.add_theme_constant_override("v_separation", 6)
 			for cand_m in GameCatalog.TRUCK_ORDER:
 				if cand_m == m_id:
 					continue
@@ -3022,6 +3416,9 @@ func _build_overview_routes_tab() -> void:
 				var sb := Button.new()
 				sb.focus_mode = Control.FOCUS_NONE
 				sb.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+				sb.custom_minimum_size = Vector2(0, 42)
+				sb.clip_text = true
+				sb.text_overrun_behavior = TextServer.OVERRUN_TRIM_ELLIPSIS
 				sb.disabled = not compat
 				sb.text = ("⇄ %s (Raw only)" % String(cdef["name"])) if not compat else ("⇄ %s (%s)" % [String(cdef["name"]), ("-" + GameCatalog.fmt_cash(net)) if net >= 0 else ("+" + GameCatalog.fmt_cash(-net))])
 				sb.pressed.connect(func():
@@ -3037,9 +3434,11 @@ func _build_overview_routes_tab() -> void:
 
 		_tab_routes_vbox.add_child(row_card)
 
+	_make_scroll_touch_friendly(_tab_routes_vbox.get_parent())
+	_restore_scroll_deferred(_tab_routes_vbox, saved_v)
+
 func _build_overview_trucks_tab() -> void:
-	for ch in _tab_trucks_vbox.get_children():
-		ch.queue_free()
+	var saved_v: int = _clear_vbox_keep_scroll(_tab_trucks_vbox)
 
 	var is_portrait: bool = get_viewport().get_visible_rect().size.x < get_viewport().get_visible_rect().size.y
 	var grid := GridContainer.new()
@@ -3103,6 +3502,8 @@ func _build_overview_trucks_tab() -> void:
 			var lb := Button.new()
 			lb.theme_type_variation = &"PrimaryButton"
 			lb.focus_mode = Control.FOCUS_NONE
+			lb.custom_minimum_size = Vector2(0, 42)
+			lb.clip_text = true
 			lb.text = "Unlock Licence — " + GameCatalog.fmt_cash(lic_p)
 			lb.pressed.connect(func():
 				if sim.buy_license(m_id):
@@ -3113,9 +3514,11 @@ func _build_overview_trucks_tab() -> void:
 
 		grid.add_child(card)
 
+	_make_scroll_touch_friendly(_tab_trucks_vbox.get_parent())
+	_restore_scroll_deferred(_tab_trucks_vbox, saved_v)
+
 func _build_overview_alerts_tab() -> void:
-	for ch in _tab_alerts_vbox.get_children():
-		ch.queue_free()
+	var saved_v: int = _clear_vbox_keep_scroll(_tab_alerts_vbox)
 
 	var alerts: Array[Dictionary] = sim.get_system_alerts()
 	if alerts.is_empty():
@@ -3127,6 +3530,7 @@ func _build_overview_alerts_tab() -> void:
 		ok_lbl.add_theme_color_override("font_color", _status_col(&"good", Color("2C7442")))
 		ok_card.add_child(ok_lbl)
 		_tab_alerts_vbox.add_child(ok_card)
+		_make_scroll_touch_friendly(_tab_alerts_vbox.get_parent())
 		return
 
 	var cb: bool = map_view.colorblind_mode if map_view != null else false
@@ -3153,6 +3557,7 @@ func _build_overview_alerts_tab() -> void:
 		tcol.add_theme_constant_override("separation", 2)
 		var t := Label.new()
 		t.theme_type_variation = &"CardTitleLabel"
+		t.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 		t.text = String(al["title"])
 		tcol.add_child(t)
 		var sub := Label.new()
@@ -3165,6 +3570,8 @@ func _build_overview_alerts_tab() -> void:
 		var go_b := Button.new()
 		go_b.theme_type_variation = &"PrimaryButton"
 		go_b.focus_mode = Control.FOCUS_NONE
+		go_b.custom_minimum_size = Vector2(0, 42)
+		go_b.size_flags_vertical = Control.SIZE_SHRINK_CENTER
 		go_b.text = "Inspect →"
 		go_b.pressed.connect(func():
 			focus_world_requested.emit(wpos)
@@ -3183,9 +3590,11 @@ func _build_overview_alerts_tab() -> void:
 		row.add_child(go_b)
 		_tab_alerts_vbox.add_child(acard)
 
+	_make_scroll_touch_friendly(_tab_alerts_vbox.get_parent())
+	_restore_scroll_deferred(_tab_alerts_vbox, saved_v)
+
 func _build_overview_maps_tab() -> void:
-	for ch in _tab_maps_vbox.get_children():
-		ch.queue_free()
+	var saved_v: int = _clear_vbox_keep_scroll(_tab_maps_vbox)
 
 	# Authentic Incremental Traffic Title Logo Banner!
 	if _logo_tex != null:
@@ -3257,7 +3666,9 @@ func _build_overview_maps_tab() -> void:
 		var play_b := Button.new()
 		play_b.theme_type_variation = &"PrimaryButton" if not active else &"Button"
 		play_b.focus_mode = Control.FOCUS_NONE
+		play_b.custom_minimum_size = Vector2(0, 44)
 		play_b.clip_text = true
+		play_b.text_overrun_behavior = TextServer.OVERRUN_TRIM_ELLIPSIS
 		play_b.disabled = active
 		play_b.text = "✓ Currently Playing" if active else ("Play " + String(m["name"]))
 		play_b.pressed.connect(func():
@@ -3267,9 +3678,12 @@ func _build_overview_maps_tab() -> void:
 		col.add_child(play_b)
 		grid.add_child(card)
 
+	_make_scroll_touch_friendly(_tab_maps_vbox.get_parent())
+	_restore_scroll_deferred(_tab_maps_vbox, saved_v)
+
 func _build_overview_options_tab() -> void:
-	for ch in _tab_opts_vbox.get_children():
-		ch.queue_free()
+	var saved_v: int = _clear_vbox_keep_scroll(_tab_opts_vbox)
+	var is_portrait: bool = get_viewport().get_visible_rect().size.x < get_viewport().get_visible_rect().size.y
 
 	# 1. Android Frame Pacing & GPU Optimization
 	var p_card := PanelContainer.new()
@@ -3280,12 +3694,14 @@ func _build_overview_options_tab() -> void:
 
 	var p_lbl := Label.new()
 	p_lbl.theme_type_variation = &"CardTitleLabel"
+	p_lbl.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	p_lbl.text = "Android Frame Pacing & GPU Optimization"
 	p_col.add_child(p_lbl)
 
 	var seg := PanelContainer.new()
 	seg.theme_type_variation = &"SegmentTrack"
-	var srow := HBoxContainer.new()
+	var srow := BoxContainer.new()
+	srow.vertical = is_portrait
 	srow.add_theme_constant_override("separation", 4)
 	seg.add_child(srow)
 	for pr in [["battery", "Battery Saver (30 FPS)"], ["balanced", "Balanced (60 FPS)"], ["ultra", "Ultra Smooth (120 FPS)"]]:
@@ -3295,6 +3711,9 @@ func _build_overview_options_tab() -> void:
 		b.toggle_mode = true
 		b.focus_mode = Control.FOCUS_NONE
 		b.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		b.custom_minimum_size = Vector2(0, 42)
+		b.clip_text = true
+		b.text_overrun_behavior = TextServer.OVERRUN_TRIM_ELLIPSIS
 		b.text = String(pr[1])
 		b.set_pressed_no_signal(perf_preset == pid)
 		b.pressed.connect(func():
@@ -3315,11 +3734,14 @@ func _build_overview_options_tab() -> void:
 
 	var v_title := Label.new()
 	v_title.theme_type_variation = &"CardTitleLabel"
+	v_title.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	v_title.text = "Visuals, Accessibility & Traffic Standard"
 	o_col.add_child(v_title)
 
 	var chk_lht := CheckBox.new()
 	chk_lht.focus_mode = Control.FOCUS_NONE
+	chk_lht.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	chk_lht.custom_minimum_size = Vector2(0, 42)
 	chk_lht.text = "Left-hand traffic (Indonesian National Road Standard)"
 	chk_lht.set_pressed_no_signal(sim.left_hand_traffic)
 	chk_lht.toggled.connect(func(on: bool):
@@ -3331,6 +3753,8 @@ func _build_overview_options_tab() -> void:
 
 	var chk_dark := CheckBox.new()
 	chk_dark.focus_mode = Control.FOCUS_NONE
+	chk_dark.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	chk_dark.custom_minimum_size = Vector2(0, 42)
 	chk_dark.text = "Dark Sticker UI & Slate Map Theme"
 	chk_dark.set_pressed_no_signal(dark_mode)
 	chk_dark.toggled.connect(func(on: bool):
@@ -3342,6 +3766,8 @@ func _build_overview_options_tab() -> void:
 
 	var chk_fly := CheckBox.new()
 	chk_fly.focus_mode = Control.FOCUS_NONE
+	chk_fly.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	chk_fly.custom_minimum_size = Vector2(0, 42)
 	chk_fly.text = "Hide Flyovers / Ghost Elevated Bridges (Update 1.9)"
 	chk_fly.set_pressed_no_signal(map_view != null and map_view.hide_flyovers)
 	chk_fly.toggled.connect(func(on: bool):
@@ -3351,6 +3777,8 @@ func _build_overview_options_tab() -> void:
 
 	var chk_cb := CheckBox.new()
 	chk_cb.focus_mode = Control.FOCUS_NONE
+	chk_cb.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	chk_cb.custom_minimum_size = Vector2(0, 42)
 	chk_cb.text = "Colour-blind Accessible Palette (Blue / Amber / Magenta)"
 	chk_cb.set_pressed_no_signal(map_view != null and map_view.colorblind_mode)
 	chk_cb.toggled.connect(func(on: bool):
@@ -3361,6 +3789,8 @@ func _build_overview_options_tab() -> void:
 
 	var chk_clouds := CheckBox.new()
 	chk_clouds.focus_mode = Control.FOCUS_NONE
+	chk_clouds.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	chk_clouds.custom_minimum_size = Vector2(0, 42)
 	chk_clouds.text = "Drifting Cloud Puffs & Shadows on Locked Regions"
 	chk_clouds.set_pressed_no_signal(map_view == null or map_view.cloud_shadows_enabled)
 	chk_clouds.toggled.connect(func(on: bool):
@@ -3378,11 +3808,14 @@ func _build_overview_options_tab() -> void:
 
 	var a_title := Label.new()
 	a_title.theme_type_variation = &"CardTitleLabel"
+	a_title.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	a_title.text = "Audio Channels & Android Haptics"
 	a_col.add_child(a_title)
 
 	var chk_sfx := CheckBox.new()
 	chk_sfx.focus_mode = Control.FOCUS_NONE
+	chk_sfx.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	chk_sfx.custom_minimum_size = Vector2(0, 42)
 	chk_sfx.text = "Original Incremental Traffic UI Sound Effects (26 WAVs)"
 	chk_sfx.set_pressed_no_signal(sim.sfx != null and not sim.sfx.muted)
 	chk_sfx.toggled.connect(func(on: bool):
@@ -3393,6 +3826,8 @@ func _build_overview_options_tab() -> void:
 
 	var chk_coin := CheckBox.new()
 	chk_coin.focus_mode = Control.FOCUS_NONE
+	chk_coin.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	chk_coin.custom_minimum_size = Vector2(0, 42)
 	chk_coin.text = "Money Popup Delivery Coin Chimes"
 	chk_coin.set_pressed_no_signal(sim.sfx == null or sim.sfx.money_popup_sound)
 	chk_coin.toggled.connect(func(on: bool):
@@ -3403,6 +3838,8 @@ func _build_overview_options_tab() -> void:
 
 	var chk_hap := CheckBox.new()
 	chk_hap.focus_mode = Control.FOCUS_NONE
+	chk_hap.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	chk_hap.custom_minimum_size = Vector2(0, 42)
 	chk_hap.text = "Android Tactile Haptics"
 	chk_hap.set_pressed_no_signal(sim.sfx == null or sim.sfx.haptics_enabled)
 	chk_hap.toggled.connect(func(on: bool):
@@ -3421,6 +3858,7 @@ func _build_overview_options_tab() -> void:
 		mv_s.max_value = 1.0
 		mv_s.step = 0.05
 		mv_s.value = sim.sfx.master_volume
+		mv_s.custom_minimum_size = Vector2(0, 36)
 		mv_s.value_changed.connect(func(v: float):
 			sim.sfx.set_volumes(v, sim.sfx.ui_volume, sim.sfx.delivery_volume, sim.sfx.ambience_volume, sim.sfx.trucks_volume)
 			mv_lbl.text = "Master Volume: %d%%" % int(round(v * 100.0))
@@ -3436,6 +3874,7 @@ func _build_overview_options_tab() -> void:
 		uv_s.max_value = 1.0
 		uv_s.step = 0.05
 		uv_s.value = sim.sfx.ui_volume
+		uv_s.custom_minimum_size = Vector2(0, 36)
 		uv_s.value_changed.connect(func(v: float):
 			sim.sfx.set_volumes(sim.sfx.master_volume, v, sim.sfx.delivery_volume, sim.sfx.ambience_volume, sim.sfx.trucks_volume)
 			uv_lbl.text = "UI Sound Volume: %d%%" % int(round(v * 100.0))
@@ -3451,6 +3890,7 @@ func _build_overview_options_tab() -> void:
 		av_s.max_value = 1.0
 		av_s.step = 0.05
 		av_s.value = sim.sfx.ambience_volume
+		av_s.custom_minimum_size = Vector2(0, 36)
 		av_s.value_changed.connect(func(v: float):
 			sim.sfx.set_volumes(sim.sfx.master_volume, sim.sfx.ui_volume, sim.sfx.delivery_volume, v, sim.sfx.trucks_volume)
 			av_lbl.text = "City Ambience Volume: %d%%" % int(round(v * 100.0))
@@ -3466,6 +3906,7 @@ func _build_overview_options_tab() -> void:
 		tv_s.max_value = 1.0
 		tv_s.step = 0.05
 		tv_s.value = sim.sfx.trucks_volume
+		tv_s.custom_minimum_size = Vector2(0, 36)
 		tv_s.value_changed.connect(func(v: float):
 			sim.sfx.set_volumes(sim.sfx.master_volume, sim.sfx.ui_volume, sim.sfx.delivery_volume, sim.sfx.ambience_volume, v)
 			tv_lbl.text = "Trucks, Rail & Ships Volume: %d%%" % int(round(v * 100.0))
@@ -3481,6 +3922,7 @@ func _build_overview_options_tab() -> void:
 		dv_s.max_value = 1.0
 		dv_s.step = 0.05
 		dv_s.value = sim.sfx.delivery_volume
+		dv_s.custom_minimum_size = Vector2(0, 36)
 		dv_s.value_changed.connect(func(v: float):
 			sim.sfx.set_volumes(sim.sfx.master_volume, sim.sfx.ui_volume, v, sim.sfx.ambience_volume, sim.sfx.trucks_volume)
 			dv_lbl.text = "Delivery Coin Volume: %d%%" % int(round(v * 100.0))
@@ -3489,14 +3931,27 @@ func _build_overview_options_tab() -> void:
 
 	var rst_btn := Button.new()
 	rst_btn.focus_mode = Control.FOCUS_NONE
+	rst_btn.custom_minimum_size = Vector2(0, 44)
+	rst_btn.clip_text = true
+	rst_btn.add_theme_color_override("font_color", _status_col(&"bad", Color("C2412F")))
 	rst_btn.text = "Reset Progress on Current Map"
 	rst_btn.pressed.connect(func():
-		sim.reset_current_map()
-		close_drawer()
-		show_toast_banner("Map reset to starting state.", 2.5)
+		var mp_nm := String(sim.map_def.get("name", "peta ini"))
+		_request_confirm_or_run(
+			"Reset Progres Peta?",
+			"Seluruh progres jalan, rute, dan armada pada %s akan diulang dari awal ($500)." % mp_nm,
+			"Ya, Reset ($500)",
+			func():
+				sim.reset_current_map()
+				close_drawer()
+				show_toast_banner("Map reset to starting state.", 2.5)
+		)
 	)
 	a_col.add_child(rst_btn)
 	_tab_opts_vbox.add_child(aud_card)
+
+	_make_scroll_touch_friendly(_tab_opts_vbox.get_parent())
+	_restore_scroll_deferred(_tab_opts_vbox, saved_v)
 
 
 # ============================================================================
@@ -3532,7 +3987,8 @@ class _ToolCardFace extends Control:
 		var r: float = minf(size.x, size.y) * 0.23
 		ItIcons.draw_tool_icon(self, tool_id, Vector2(size.x * 0.5, size.y * 0.37), r)
 		var f: Font = font_ref if font_ref != null else ThemeDB.fallback_font
-		draw_string(f, Vector2(2.0, size.y - 6.0), caption, HORIZONTAL_ALIGNMENT_CENTER, size.x - 4.0, 11, ink)
+		var fs: int = 9 if (size.x < 64.0 and caption.length() >= 8) else 11
+		draw_string(f, Vector2(2.0, size.y - 6.0), caption, HORIZONTAL_ALIGNMENT_CENTER, size.x - 4.0, fs, ink)
 
 
 class _OverlayIconFace extends Control:
